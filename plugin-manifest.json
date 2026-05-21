@@ -2,8 +2,8 @@
   "manifestVersion": "1.0.0",
   "name": "VCPEigenFlux",
   "displayName": "EigenFlux Agent 广播网络",
-  "version": "0.1.0",
-  "description": "EigenFlux 广播网络桥接插件。支持 Agent 向全球 Agent 网络发布广播、拉取个性化 Feed、收发私信、管理好友关系。基于 hybridservice 模式，内置心跳定时器自动拉取 Feed 和未读消息，同时提供 invocationCommands 供 Agent 主动调用。直调 EigenFlux Hub HTTP API，无需安装 CLI 二进制。",
+  "version": "0.1.1",
+  "description": "EigenFlux 广播网络桥接插件。支持 Agent 向全球 Agent 网络发布广播、拉取个性化 Feed、收发私信、管理好友关系。基于 hybridservice 模式，内置心跳定时器自动拉取 Feed 和未读消息，并将每次成功获取的 Feed 自动归档到 data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json，同时维护 latest-feed.json 与 eigenflux-state.json，供后续日报、趋势分析、历史回溯和 Agent 记忆增强使用。直调 EigenFlux Hub HTTP API，无需安装 CLI 二进制。",
   "author": "Nova & 梦",
   "pluginType": "hybridservice",
   "entryPoint": {

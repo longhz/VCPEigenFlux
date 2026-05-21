@@ -13,6 +13,9 @@ const fs = require('fs');
 
 const DATA_FILE = path.join(__dirname, 'eigenflux-data.json');
 const CONFIG_FILE = path.join(__dirname, 'config.env');
+const ARCHIVE_ROOT = path.join(__dirname, 'data', 'feed-archive');
+const LATEST_FEED_FILE = path.join(__dirname, 'data', 'latest-feed.json');
+const ARCHIVE_STATE_FILE = path.join(__dirname, 'data', 'eigenflux-state.json');
 
 let efConfig = {
     hubEndpoint: 'https://www.eigenflux.ai',
@@ -113,6 +116,162 @@ function saveData() {
         fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
     } catch (e) {
         console.error('[VCPEigenFlux] 保存数据失败:', e.message);
+    }
+}
+
+function ensureDir(dirPath) {
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+    }
+}
+
+function safeJsonRead(filePath, fallback) {
+    try {
+        if (!fs.existsSync(filePath)) return fallback;
+        return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (e) {
+        console.error(`[VCPEigenFlux] JSON读取失败 ${filePath}:`, e.message);
+        return fallback;
+    }
+}
+
+function safeJsonWrite(filePath, data) {
+    ensureDir(path.dirname(filePath));
+    const tmpFile = `${filePath}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, filePath);
+}
+
+function getLocalDateParts(date = new Date()) {
+    const year = String(date.getFullYear());
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return { year, month, day, dateKey: `${year}-${month}-${day}` };
+}
+
+function getFeedItemId(item) {
+    if (!item || typeof item !== 'object') return '';
+    if (item.item_id) return String(item.item_id);
+    if (item.id) return String(item.id);
+    const basis = [
+        item.author_id || item.author_name || '',
+        item.created_at || item.createdAt || '',
+        item.summary || '',
+        item.content || ''
+    ].join('|');
+    let hash = 0;
+    for (let i = 0; i < basis.length; i++) {
+        hash = ((hash << 5) - hash + basis.charCodeAt(i)) | 0;
+    }
+    return `hash_${Math.abs(hash)}`;
+}
+
+function archiveFeedItems(items, meta = {}) {
+    try {
+        if (!Array.isArray(items)) return { archived: false, newItems: 0, totalItems: 0 };
+
+        const now = new Date();
+        const nowIso = now.toISOString();
+        const { year, month, dateKey } = getLocalDateParts(now);
+        const dayDir = path.join(ARCHIVE_ROOT, year, month);
+        const dailyFile = path.join(dayDir, `${dateKey}-eigenflux-feed.json`);
+
+        const archive = safeJsonRead(dailyFile, {
+            date: dateKey,
+            source: 'EigenFlux',
+            title: `EigenFlux Feed Archive ${dateKey}`,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            heartbeatCount: 0,
+            totalItems: 0,
+            newItems: 0,
+            items: []
+        });
+
+        const archiveState = safeJsonRead(ARCHIVE_STATE_FILE, {
+            source: 'EigenFlux',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            totalSeenItems: 0,
+            days: {},
+            seenItemIds: {}
+        });
+
+        const byId = new Map();
+        for (const oldItem of archive.items || []) {
+            const id = getFeedItemId(oldItem);
+            if (id) byId.set(id, oldItem);
+        }
+
+        let newCount = 0;
+        for (const rawItem of items) {
+            const id = getFeedItemId(rawItem);
+            if (!id) continue;
+
+            if (byId.has(id)) {
+                const existing = byId.get(id);
+                existing.lastSeenAt = nowIso;
+                existing.seenCount = (existing.seenCount || 1) + 1;
+                existing.raw = rawItem;
+            } else {
+                const archivedItem = {
+                    item_id: id,
+                    firstSeenAt: nowIso,
+                    lastSeenAt: nowIso,
+                    seenCount: 1,
+                    raw: rawItem
+                };
+                archive.items.push(archivedItem);
+                byId.set(id, archivedItem);
+                newCount++;
+            }
+
+            archiveState.seenItemIds[id] = {
+                firstSeenAt: archiveState.seenItemIds[id]?.firstSeenAt || nowIso,
+                lastSeenAt: nowIso,
+                lastDate: dateKey
+            };
+        }
+
+        archive.updatedAt = nowIso;
+        archive.heartbeatCount = (archive.heartbeatCount || 0) + 1;
+        archive.totalItems = archive.items.length;
+        archive.newItems = (archive.newItems || 0) + newCount;
+        archive.lastHeartbeat = {
+            at: nowIso,
+            feedCount: items.length,
+            newItems: newCount,
+            action: meta.action || 'refresh',
+            limit: meta.limit || efConfig.feedLimit
+        };
+
+        archiveState.updatedAt = nowIso;
+        archiveState.totalSeenItems = Object.keys(archiveState.seenItemIds || {}).length;
+        archiveState.days[dateKey] = {
+            file: dailyFile,
+            totalItems: archive.totalItems,
+            updatedAt: nowIso
+        };
+
+        const latest = {
+            source: 'EigenFlux',
+            updatedAt: nowIso,
+            date: dateKey,
+            feedCount: items.length,
+            newItems: newCount,
+            dailyArchiveFile: dailyFile,
+            items
+        };
+
+        safeJsonWrite(dailyFile, archive);
+        safeJsonWrite(LATEST_FEED_FILE, latest);
+        safeJsonWrite(ARCHIVE_STATE_FILE, archiveState);
+
+        return { archived: true, newItems: newCount, totalItems: archive.totalItems, file: dailyFile };
+    } catch (e) {
+        state.stats.errorCount++;
+        console.error('[VCPEigenFlux] Feed归档失败:', e.message);
+        return { archived: false, error: e.message, newItems: 0, totalItems: 0 };
     }
 }
 
@@ -269,6 +428,8 @@ async function feedPoll(limit, action = 'refresh', cursor = '') {
         state.feedCache = resp.data.data?.items || [];
         state.lastFeedPoll = new Date().toISOString();
         state.stats.feedPollCount++;
+        const archiveResult = archiveFeedItems(state.feedCache, { limit, action, cursor });
+        state.lastArchive = archiveResult;
         saveData();
     }
     return resp;
