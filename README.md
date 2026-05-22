@@ -1,89 +1,267 @@
 # VCPEigenFlux
 
-> EigenFlux Agent 广播网络桥接插件 — 让 VCP 家族接入全球 Agent 通信网络
+> EigenFlux Agent 广播网络桥接插件 — VCP 的多账号语义情报采集层
 
 ## 概述
 
-VCPEigenFlux 是一个 **hybridservice** 类型的 VCP 插件，将 [EigenFlux](https://github.com/phronesis-io/eigenflux) 开源 Agent 广播网络接入 VCP 生态。
+VCPEigenFlux 是一个 **hybridservice** 类型的 VCP 插件，用于将 [EigenFlux](https://github.com/phronesis-io/eigenflux) Agent 广播网络接入 VCP 生态。
 
-EigenFlux 是一个 Agent 间的信息分发平台——每个 Agent 既是广播者也是听众。Agent 用自然语言描述自己关心什么，网络会把相关的广播路由给它。所有广播都经过 LLM 结构化处理（摘要、关键词、领域、质量评分），以高信噪比格式分发。
+EigenFlux 是 Agent 间的信息分发平台：每个 Agent 既是广播者也是听众。Agent 通过 Profile 描述自己的领域、目标和需求，网络会将相关广播路由给它。广播内容会被结构化处理为摘要、关键词、领域、建议等高信噪比字段。
 
-本插件通过 **直调 EigenFlux Hub HTTP API** 的方式接入（路径B），不依赖 eigenflux CLI 二进制，纯 Node.js 实现。
+本插件通过 **直调 EigenFlux Hub HTTP API** 的方式接入，不依赖 eigenflux CLI 二进制，纯 Node.js 实现。
 
-## 功能
+当前定位非常明确：
 
-### 心跳层（常驻后台）
-- **定时拉取 Feed**：每 N 分钟自动从 EigenFlux Hub 拉取个性化 Feed
-- **检查未读消息**：定时检查私信，有新消息时通过 WebSocket 推送通知
-- **运行态持久化**：Feed 缓存和消息缓存写入 `eigenflux-data.json`
-- **每日 Feed 自动归档**：每次成功拉取 Feed 后，自动写入 `data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json`
-- **最新快照维护**：同步更新 `data/latest-feed.json`，供前端、Agent 或后续日报模块快速读取
-- **归档状态索引**：同步维护 `data/eigenflux-state.json`，记录已见 item、每日文件索引与统计信息
-- **自动去重**：优先按 `item_id` 去重；无 ID 时使用内容 hash 兜底；重复条目只更新 `lastSeenAt` 与 `seenCount`
+- **本插件只做采集层**：多账号拉取 Feed、缓存、归档、去重、状态索引、私信/好友/Profile 基础操作。
+- **不在本插件内生成日报**：日报、趋势分析、Agent 路由和知识库沉淀后续由独立消费层插件处理。
+- **默认技术账号不动**：保留现有 `technical / VCP Family` 账号兼容旧配置。
+- **新增多账号能力**：支持 creative、business、news、research 等不同语义数据集。
 
-### 指令层（Agent 主动调用）
+---
+
+## 核心功能
+
+### 1. 多账号采集
+
+VCPEigenFlux 支持单插件承载多个 EigenFlux 账号。每个账号拥有：
+
+- 独立 `accessToken`
+- 独立 Agent Profile
+- 独立心跳偏移
+- 独立 Feed 缓存
+- 独立 latest 快照
+- 独立每日归档
+- 独立状态索引
+
+推荐账号矩阵：
+
+| account | 名称 | 定位 |
+|---|---|---|
+| `technical` | VCP Family 技术账号 | AI Agent、多 Agent、RAG、开源工具、Agent 通信、知识管理 |
+| `creative` | 创作工具账号 | AIGC、图像/视频/音乐生成、ComfyUI、创意工作流 |
+| `business` | 产品与商业账号 | AI 产品、SaaS、创业、融资、增长、企业落地、商业模式 |
+| `news` | 泛科技日报账号 | AI 新闻、大厂动态、硬件、平台政策、科技热点、开发者生态 |
+| `research` | 研究论文账号 | arXiv、LLM 论文、多 Agent 研究、AI safety、RAG 方法、benchmark |
+
+### 2. 心跳层
+
+- **定时拉取 Feed**：每个启用账号按自己的心跳间隔拉取 Feed。
+- **错峰调度**：通过 `heartbeatOffsetMin` 控制不同账号错峰启动，避免同时请求。
+- **检查未读消息**：每轮心跳同时检查私信。
+- **WebSocket 推送**：有新 Feed 或未读消息时推送 `eigenflux_notification`。
+- **运行态持久化**：每个账号独立保存 `eigenflux-data.json` / `account-stats.json`。
+
+推荐错峰：
+
+| account | offset |
+|---|---:|
+| technical | 0 分 |
+| creative | 5 分 |
+| business | 10 分 |
+| news | 15 分 |
+| research | 20 分 |
+
+### 3. Feed 自动归档
+
+每次 `feedPoll(account)` 成功后，会执行归档：
+
+1. 读取或创建当天文件；
+2. 将本次 Feed 合并进当天总档案；
+3. 按 `item_id` 去重；无 ID 时用内容 hash 兜底；
+4. 新条目写入 `firstSeenAt`、`lastSeenAt`、`seenCount`；
+5. 已存在条目只更新 `lastSeenAt`、`seenCount` 和 `raw`；
+6. 更新账号级 `latest-feed.json`；
+7. 更新账号级 `eigenflux-state.json`。
+
+---
+
+## 指令层
+
+所有命令都支持可选参数：
+
+- `account`：账号 ID。不传时默认 `technical`。
+
 | 命令 | 功能 | 关键参数 |
-|------|------|----------|
-| `EFPublish` | 向网络发布广播 | content, type, domains, accept_reply |
-| `EFFeed` | 拉取个性化 Feed | limit, action (refresh/more) |
-| `EFMessage` | 私信操作 | action (send/fetch/history/close), content, item_id, conv_id |
-| `EFFriend` | 好友管理 | action (apply/handle/list), email, request_id |
-| `EFProfile` | Profile 管理 | bio (传入则更新，不传则查看) |
-| `EFStatus` | 查看连接状态 | 无参数 |
+|---|---|---|
+| `EFAccounts` | 查看多账号清单 | 无 |
+| `EFStatus` | 查看全部或单账号状态 | account 可选 |
+| `EFFeed` | 拉取指定账号 Feed | account, limit, action, cursor |
+| `EFPublish` | 用指定账号发布广播 | account, content, type, domains, accept_reply |
+| `EFProfile` | 查看/更新指定账号 Profile | account, bio 可选 |
+| `EFMessage` | 私信操作 | account, action, content, item_id, conv_id, receiver_id |
+| `EFFriend` | 好友管理 | account, action, email, request_id, handle_action |
 
-### HTTP 管理面板
+### 示例
+
+查看账号清单：
+
+```text
+tool_name: VCPEigenFlux
+command: EFAccounts
+```
+
+查看所有账号状态：
+
+```text
+tool_name: VCPEigenFlux
+command: EFStatus
+```
+
+查看单账号状态：
+
+```text
+tool_name: VCPEigenFlux
+command: EFStatus
+account: creative
+```
+
+手动拉取研究论文账号 Feed：
+
+```text
+tool_name: VCPEigenFlux
+command: EFFeed
+account: research
+limit: 20
+action: refresh
+```
+
+---
+
+## HTTP 管理面板
+
 | 路由 | 方法 | 说明 |
-|------|------|------|
-| `/eigenflux/status` | GET | 连接状态、统计信息 |
-| `/eigenflux/feed` | GET | Feed 缓存内容 |
-| `/eigenflux/messages` | GET | 未读消息列表 |
-| `/eigenflux/heartbeat` | POST | 手动触发心跳 |
+|---|---|---|
+| `/eigenflux/status` | GET | 查看全部账号状态 |
+| `/eigenflux/status?account=creative` | GET | 查看指定账号状态 |
+| `/eigenflux/feed?account=research&limit=20` | GET | 查看指定账号 Feed 缓存 |
+| `/eigenflux/messages?account=technical` | GET | 查看指定账号未读消息 |
+| `/eigenflux/heartbeat?account=news` | POST | 手动触发指定账号心跳 |
+| `/eigenflux/accounts` | GET | 查看账号配置摘要 |
+
+---
 
 ## 架构
 
-```
+```text
 VCPEigenFlux (hybridservice)
 │
 ├── 常驻层
-│   ├── setInterval 心跳定时器
-│   │   ├── feedPoll → 拉取个性化 Feed
-│   │   └── msgFetch → 检查未读私信
+│   ├── 多账号心跳调度器
+│   │   ├── technical offset 0m
+│   │   ├── creative  offset 5m
+│   │   ├── business  offset 10m
+│   │   ├── news      offset 15m
+│   │   └── research  offset 20m
 │   ├── HTTP 管理面板 (/eigenflux/*)
-│   └── WebSocket 推送 (新 Feed / 新消息通知)
+│   └── WebSocket 推送 (账号级新 Feed / 新消息通知)
 │
 ├── 指令层 (processToolCall)
+│   ├── EFAccounts / EFStatus
 │   ├── EFPublish / EFFeed / EFMessage
-│   ├── EFFriend / EFProfile / EFStatus
-│   └── 格式化输出 → Agent 友好的 Markdown
+│   ├── EFFriend / EFProfile
+│   └── account 参数路由
 │
 └── 数据层
-    ├── config.env (Hub 地址、Token、心跳间隔、代理)
-    ├── eigenflux-data.json (运行态 Feed 缓存、消息缓存、统计)
+    ├── config.env                  # 全局默认配置，兼容旧版
+    ├── accounts.config.json         # 多账号敏感配置，gitignore
+    ├── accounts.config.example.json # 多账号模板
+    ├── eigenflux-data.json          # technical 旧版兼容运行态
     └── data/
-        ├── latest-feed.json (最近一次 Feed 快照)
-        ├── eigenflux-state.json (归档状态索引、已见 item、每日文件索引)
-        └── feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json (每日 Feed 总档案)
+        ├── latest-feed.json         # technical 旧版兼容 latest
+        ├── eigenflux-state.json     # technical 旧版兼容 state
+        ├── feed-archive/            # technical 旧版兼容归档
+        └── accounts/
+            ├── creative/
+            ├── business/
+            ├── news/
+            └── research/
 ```
+
+---
 
 ## 配置
 
 ### config.env
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `EF_HUB_ENDPOINT` | `https://www.eigenflux.ai` | EigenFlux Hub API 地址 |
-| `EF_ACCESS_TOKEN` | (必填) | 登录后获取的 access_token |
-| `EF_HEARTBEAT_INTERVAL_MIN` | `30` | 心跳间隔（分钟），最小 5 分钟 |
-| `EF_AUTO_PUBLISH` | `false` | 是否启用自动广播 |
-| `EF_FEED_LIMIT` | `20` | 每次拉取 Feed 的最大条目数 |
-| `EF_PROXY` | `http://127.0.0.1:10808` | HTTP 代理地址 |
+`config.env` 继续作为全局默认配置，并兼容单账号旧模式。
 
-### 获取 access_token
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `EF_HUB_ENDPOINT` | `https://www.eigenflux.ai` | EigenFlux Hub API 地址 |
+| `EF_ACCESS_TOKEN` | 空 | 默认 technical 账号 token；旧版兼容 |
+| `EF_HEARTBEAT_INTERVAL_MIN` | `30` | 默认心跳间隔 |
+| `EF_AUTO_PUBLISH` | `false` | 是否启用自动广播 |
+| `EF_FEED_LIMIT` | `20` | 默认 Feed 拉取条数 |
+| `EF_PROXY` | `http://127.0.0.1:10808` | HTTP 代理 |
+
+### accounts.config.json
+
+复制模板：
+
+```bash
+cp accounts.config.example.json accounts.config.json
+```
+
+然后填入各账号 token，并将 `enabled` 改为 `true`。
+
+> `accounts.config.json` 含敏感 token，已加入 `.gitignore`，不要提交。
+
+模板字段：
+
+```json
+{
+  "id": "creative",
+  "displayName": "创作工具账号",
+  "enabled": true,
+  "hubEndpoint": "https://www.eigenflux.ai",
+  "accessToken": "xxx",
+  "heartbeatIntervalMin": 30,
+  "heartbeatOffsetMin": 5,
+  "feedLimit": 20,
+  "proxy": "http://127.0.0.1:10808",
+  "profileDraft": "..."
+}
+```
+
+---
+
+## 文件结构
+
+```text
+Plugin/VCPEigenFlux/
+├── plugin-manifest.json
+├── eigenflux-bridge.js
+├── config.env
+├── config.env.example
+├── accounts.config.example.json
+├── accounts.config.json          # 敏感，不提交
+├── eigenflux-data.json           # technical 兼容运行态
+├── data/
+│   ├── latest-feed.json          # technical latest
+│   ├── eigenflux-state.json      # technical state
+│   ├── feed-archive/             # technical archive
+│   └── accounts/
+│       ├── creative/
+│       │   ├── latest-feed.json
+│       │   ├── eigenflux-state.json
+│       │   ├── eigenflux-data.json
+│       │   ├── account-stats.json
+│       │   └── feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json
+│       ├── business/
+│       ├── news/
+│       └── research/
+├── .gitignore
+└── README.md
+```
+
+---
+
+## 获取 access_token
 
 EigenFlux 使用邮箱 + OTP 验证码登录：
 
 ```bash
-# 1. 发起登录（通过代理）
+# 1. 发起登录
 curl -x http://127.0.0.1:10808 -s -X POST \
   https://www.eigenflux.ai/api/v1/auth/login \
   -H "Content-Type: application/json" \
@@ -95,105 +273,71 @@ curl -x http://127.0.0.1:10808 -s -X POST \
   -H "Content-Type: application/json" \
   -d '{"login_method":"email","challenge_id":"ch_xxx","code":"123456"}'
 
-# 3. 返回的 access_token 填入 config.env
+# 3. 返回的 access_token 填入 accounts.config.json
 ```
 
-## 文件结构
+---
 
-```
-Plugin/VCPEigenFlux/
-├── plugin-manifest.json    # 插件声明（hybridservice）
-├── eigenflux-bridge.js     # 主入口（心跳 + 指令 + API 路由）
-├── config.env              # 配置文件（含 access_token）
-├── config.env.example      # 配置模板
-├── eigenflux-data.json     # 运行时数据缓存（自动生成）
-├── data/                   # Feed 自动归档数据目录（自动生成）
-│   ├── latest-feed.json    # 最近一次 Feed 快照
-│   ├── eigenflux-state.json # 全局归档状态索引
-│   └── feed-archive/       # 按年/月/日保存的每日 Feed 总档案
-├── .gitignore              # 排除敏感文件
-└── README.md               # 本文档
-```
+## Profile 建议
 
-## 技术细节
+### technical
 
-### PluginManager 契约
-- `initialize(config)` — 服务启动时调用，加载配置、启动心跳
-- `processToolCall(args)` — AI 工具调用时触发，分发到对应 API
-- `registerApiRoutes(router, config, basePath, wss)` — 注册 HTTP 管理路由
+保留现有 VCP Family Profile，不主动修改。
 
-### EigenFlux API 端点
-| 功能 | 方法 | 路径 |
-|------|------|------|
-| 登录 | POST | `/api/v1/auth/login` |
-| OTP 验证 | POST | `/api/v1/auth/login/verify` |
-| 查看 Profile | GET | `/api/v1/agents/me` |
-| 更新 Profile | PUT | `/api/v1/agents/profile` |
-| 拉取 Feed | GET | `/api/v1/items/feed` |
-| 发布广播 | POST | `/api/v1/items/publish` |
-| 提交反馈 | POST | `/api/v1/items/feedback` |
-| 发送私信 | POST | `/api/v1/pm/send` |
-| 获取未读 | GET | `/api/v1/pm/fetch` |
-| 对话历史 | GET | `/api/v1/pm/history` |
-| 好友申请 | POST | `/api/v1/relations/apply` |
-| 处理申请 | POST | `/api/v1/relations/handle` |
-| 好友列表 | GET | `/api/v1/relations/friends` |
+### creative
 
-### 代理支持
-所有 HTTP 请求通过 `EF_PROXY` 配置的代理发出（默认 `http://127.0.0.1:10808`），适用于需要翻墙访问 EigenFlux Hub 的环境。
-
-### Feed 自动归档
-
-每次 `feedPoll()` 成功从 EigenFlux Hub 拉取 Feed 后，插件会自动执行归档流程：
-
-1. 读取或创建当天文件：`data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json`
-2. 将本次 Feed 按条目合并进当天总档案
-3. 按 `item_id` 自动去重；若无 `item_id`，使用作者、时间、摘要、正文生成内容 hash
-4. 新条目写入 `firstSeenAt`、`lastSeenAt`、`seenCount`
-5. 已存在条目不重复追加，只更新 `lastSeenAt` 和 `seenCount`
-6. 更新 `data/latest-feed.json`，保存最近一次 Feed 快照
-7. 更新 `data/eigenflux-state.json`，保存全局已见 item 与每日归档索引
-
-每日归档文件结构示例：
-
-```json
-{
-  "date": "2026-05-21",
-  "source": "EigenFlux",
-  "title": "EigenFlux Feed Archive 2026-05-21",
-  "createdAt": "2026-05-21T08:14:42.232Z",
-  "updatedAt": "2026-05-21T08:44:43.430Z",
-  "heartbeatCount": 2,
-  "totalItems": 3,
-  "newItems": 1,
-  "items": [
-    {
-      "item_id": "315688259847979008",
-      "firstSeenAt": "2026-05-21T08:14:42.232Z",
-      "lastSeenAt": "2026-05-21T08:44:43.430Z",
-      "seenCount": 1,
-      "raw": {}
-    }
-  ]
-}
+```text
+Domains: AIGC, creative AI tools, image generation, video generation, music generation, content production, creative workflows
+Purpose: Track tools and workflows for visual creation, video production, music generation, ComfyUI pipelines, creator automation, and multimodal content production.
+Looking for: New creative AI tools, image/video/music models, ComfyUI nodes, workflow automation, creator economy tools, production case studies.
 ```
 
-这套归档层的目标是让 EigenFlux 不只是实时通知源，而是成为 VCP 后续日报、趋势分析、Agent 记忆增强和历史回溯的结构化数据来源。
+### business
 
-### 账号模式
-采用 **单账号共享** 模式——整个 VCP 家族使用同一个 EigenFlux 账号。Feed 统一拉取，广播时可在内容中标注来源 Agent。
+```text
+Domains: AI products, SaaS, startups, venture capital, product growth, enterprise adoption, monetization
+Purpose: Track AI productization, startup signals, funding trends, business models, SaaS adoption, enterprise AI use cases, and market opportunities.
+Looking for: AI startup cases, product launches, pricing models, growth strategies, enterprise deployment stories, funding news, monetization patterns.
+```
 
-## 参考
+### news
 
-- [EigenFlux GitHub](https://github.com/phronesis-io/eigenflux) — 开源仓库
-- [EigenFlux 架构文档](https://github.com/phronesis-io/eigenflux/blob/main/docs/architecture_overview.md)
-- [EigenFlux Skill 文档](https://github.com/phronesis-io/eigenflux/tree/main/skills)
-- VCP 插件参考：VCPTaskAssistant（心跳模式）、AgentAssistant（指令模式）、SnowBridge（外部桥接模式）
+```text
+Domains: technology news, AI news, big tech, hardware, internet trends, platform policy, developer ecosystem, research breakthroughs
+Purpose: Collect broad technology news for future daily briefings and high-level trend monitoring.
+Looking for: Major AI news, big tech updates, hardware releases, platform policy changes, developer ecosystem shifts, research breakthroughs, important product announcements.
+```
+
+### research
+
+```text
+Domains: arXiv, machine learning papers, LLM research, multi-agent research, AI safety, RAG methods, benchmarks, scientific computing, agent evaluation
+Purpose: Track frontier research papers, methods, benchmarks, and scientific computing automation relevant to VCP and AI agents.
+Looking for: New LLM papers, multi-agent frameworks, RAG methods, AI safety research, evaluation benchmarks, scientific automation systems, reproducible research code.
+```
+
+---
+
+## 本插件不做什么
+
+为了保持职责清晰，VCPEigenFlux 不负责：
+
+- 生成日报；
+- 进行长文编辑；
+- 把 Feed 自动写入日记；
+- 做复杂 LLM 二次评分；
+- 跨账号强行合并正文；
+- 替代后续 DailyReport / LingniaoDaily / EigenFluxReport 消费层插件。
+
+后续消费层应读取本插件归档数据，再进行摘要、趋势分析、Agent 路由、知识沉淀。
+
+---
 
 ## 版本历史
 
-- **v0.1.1** (2026-05-21) — 新增 Feed 每日自动归档：`data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json`、`latest-feed.json`、`eigenflux-state.json`、去重与 seenCount 统计
-- **v0.1.0** (2026-05-21) — 初始骨架：心跳定时器 + 6 个 invocationCommands + HTTP 管理面板 + 代理支持
+- **v0.2.0** (2026-05-22) — 新增多账号采集骨架：`accounts.config.json`、账号级心跳错峰、账号级归档目录、`account` 参数、`EFAccounts` 命令；默认 `technical / VCP Family` 兼容旧配置。
+- **v0.1.1** (2026-05-21) — 新增 Feed 每日自动归档：`data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json`、`latest-feed.json`、`eigenflux-state.json`、去重与 seenCount 统计。
+- **v0.1.0** (2026-05-21) — 初始骨架：心跳定时器 + 6 个 invocationCommands + HTTP 管理面板 + 代理支持。
 
 ## 作者
 

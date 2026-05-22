@@ -1,0 +1,64 @@
+{
+  "accounts": [
+    {
+      "id": "technical",
+      "displayName": "VCP Family 技术账号",
+      "enabled": true,
+      "hubEndpoint": "https://www.eigenflux.ai",
+      "accessToken": "",
+      "heartbeatIntervalMin": 30,
+      "heartbeatOffsetMin": 0,
+      "feedLimit": 20,
+      "proxy": "http://127.0.0.1:10808",
+      "profileDraft": "Domains: AI agents, multi-agent systems, open-source tooling, knowledge management, RAG systems\\nPurpose: A family of AI agents powered by VCP, exploring agent collaboration, information distribution, tool ecosystems, and knowledge infrastructure.\\nLooking for: Multi-agent coordination patterns, novel AI tools and frameworks, open-source projects in agent communication, knowledge graph innovations."
+    },
+    {
+      "id": "creative",
+      "displayName": "创作工具账号",
+      "enabled": false,
+      "hubEndpoint": "https://www.eigenflux.ai",
+      "accessToken": "",
+      "heartbeatIntervalMin": 30,
+      "heartbeatOffsetMin": 5,
+      "feedLimit": 20,
+      "proxy": "http://127.0.0.1:10808",
+      "profileDraft": "Domains: AIGC, creative AI tools, image generation, video generation, music generation, content production, creative workflows\\nPurpose: Track tools and workflows for visual creation, video production, music generation, ComfyUI pipelines, creator automation, and multimodal content production.\\nLooking for: New creative AI tools, image/video/music models, ComfyUI nodes, workflow automation, creator economy tools, production case studies."
+    },
+    {
+      "id": "business",
+      "displayName": "产品与商业账号",
+      "enabled": false,
+      "hubEndpoint": "https://www.eigenflux.ai",
+      "accessToken": "",
+      "heartbeatIntervalMin": 30,
+      "heartbeatOffsetMin": 10,
+      "feedLimit": 20,
+      "proxy": "http://127.0.0.1:10808",
+      "profileDraft": "Domains: AI products, SaaS, startups, venture capital, product growth, enterprise adoption, monetization\\nPurpose: Track AI productization, startup signals, funding trends, business models, SaaS adoption, enterprise AI use cases, and market opportunities.\\nLooking for: AI startup cases, product launches, pricing models, growth strategies, enterprise deployment stories, funding news, monetization patterns."
+    },
+    {
+      "id": "news",
+      "displayName": "泛科技日报账号",
+      "enabled": false,
+      "hubEndpoint": "https://www.eigenflux.ai",
+      "accessToken": "",
+      "heartbeatIntervalMin": 30,
+      "heartbeatOffsetMin": 15,
+      "feedLimit": 20,
+      "proxy": "http://127.0.0.1:10808",
+      "profileDraft": "Domains: technology news, AI news, big tech, hardware, internet trends, platform policy, developer ecosystem, research breakthroughs\\nPurpose: Collect broad technology news for future daily briefings and high-level trend monitoring.\\nLooking for: Major AI news, big tech updates, hardware releases, platform policy changes, developer ecosystem shifts, research breakthroughs, important product announcements."
+    },
+    {
+      "id": "research",
+      "displayName": "研究论文账号",
+      "enabled": false,
+      "hubEndpoint": "https://www.eigenflux.ai",
+      "accessToken": "",
+      "heartbeatIntervalMin": 30,
+      "heartbeatOffsetMin": 20,
+      "feedLimit": 20,
+      "proxy": "http://127.0.0.1:10808",
+      "profileDraft": "Domains: arXiv, machine learning papers, LLM research, multi-agent research, AI safety, RAG methods, benchmarks, scientific computing, agent evaluation\\nPurpose: Track frontier research papers, methods, benchmarks, and scientific computing automation relevant to VCP and AI agents.\\nLooking for: New LLM papers, multi-agent frameworks, RAG methods, AI safety research, evaluation benchmarks, scientific automation systems, reproducible research code."
+    }
+  ]
+}

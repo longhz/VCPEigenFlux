@@ -1,5 +1,6 @@
 // eigenflux-bridge.js — VCPEigenFlux 插件主入口 (hybridservice)
 // 直调 EigenFlux Hub HTTP API，不依赖 CLI 二进制
+// v0.2.0: multi-account collector scaffold
 // 契约：initialize(config) / processToolCall(args) / registerApiRoutes(router, config, basePath, wss)
 
 const http = require('http');
@@ -11,11 +12,11 @@ const fs = require('fs');
 // 常量 & 全局状态
 // ============================================================
 
-const DATA_FILE = path.join(__dirname, 'eigenflux-data.json');
 const CONFIG_FILE = path.join(__dirname, 'config.env');
-const ARCHIVE_ROOT = path.join(__dirname, 'data', 'feed-archive');
-const LATEST_FEED_FILE = path.join(__dirname, 'data', 'latest-feed.json');
-const ARCHIVE_STATE_FILE = path.join(__dirname, 'data', 'eigenflux-state.json');
+const ACCOUNTS_CONFIG_FILE = path.join(__dirname, 'accounts.config.json');
+const DEFAULT_ACCOUNT_ID = 'technical';
+const DATA_ROOT = path.join(__dirname, 'data');
+const LEGACY_DATA_FILE = path.join(__dirname, 'eigenflux-data.json');
 
 let efConfig = {
     hubEndpoint: 'https://www.eigenflux.ai',
@@ -26,20 +27,12 @@ let efConfig = {
     proxy: 'http://127.0.0.1:10808'
 };
 
+let accountConfigs = {};
 let state = {
-    connected: false,
-    lastFeedPoll: null,
-    lastMsgCheck: null,
-    feedCache: [],
-    unreadMessages: [],
-    profile: null,
-    heartbeatTimer: null,
     startTime: null,
     webSocketServer: null,
+    accounts: {},
     stats: {
-        feedPollCount: 0,
-        publishCount: 0,
-        msgSendCount: 0,
         errorCount: 0
     }
 };
@@ -50,31 +43,29 @@ let state = {
 
 function loadConfigFromEnv() {
     try {
-        if (fs.existsSync(CONFIG_FILE)) {
-            const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
-            for (const line of content.split('\n')) {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith('#')) continue;
-                const eqIdx = trimmed.indexOf('=');
-                if (eqIdx === -1) continue;
-                const key = trimmed.substring(0, eqIdx).trim();
-                const val = trimmed.substring(eqIdx + 1).trim();
-                switch (key) {
-                    case 'EF_HUB_ENDPOINT': efConfig.hubEndpoint = val || efConfig.hubEndpoint; break;
-                    case 'EF_ACCESS_TOKEN': efConfig.accessToken = val; break;
-                    case 'EF_HEARTBEAT_INTERVAL_MIN': efConfig.heartbeatIntervalMin = parseInt(val) || 30; break;
-                    case 'EF_AUTO_PUBLISH': efConfig.autoPublish = val === 'true'; break;
-                    case 'EF_FEED_LIMIT': efConfig.feedLimit = parseInt(val) || 20; break;
-                    case 'EF_PROXY': efConfig.proxy = val || ''; break;
-                }
+        if (!fs.existsSync(CONFIG_FILE)) return;
+        const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
+        for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx === -1) continue;
+            const key = trimmed.substring(0, eqIdx).trim();
+            const val = trimmed.substring(eqIdx + 1).trim();
+            switch (key) {
+                case 'EF_HUB_ENDPOINT': efConfig.hubEndpoint = val || efConfig.hubEndpoint; break;
+                case 'EF_ACCESS_TOKEN': efConfig.accessToken = val; break;
+                case 'EF_HEARTBEAT_INTERVAL_MIN': efConfig.heartbeatIntervalMin = parseInt(val) || 30; break;
+                case 'EF_AUTO_PUBLISH': efConfig.autoPublish = val === 'true'; break;
+                case 'EF_FEED_LIMIT': efConfig.feedLimit = parseInt(val) || 20; break;
+                case 'EF_PROXY': efConfig.proxy = val || ''; break;
             }
         }
     } catch (e) {
-        console.error('[VCPEigenFlux] 加载配置失败:', e.message);
+        console.error('[VCPEigenFlux] 加载 config.env 失败:', e.message);
     }
 }
 
-// 也从 PluginManager 传入的 pluginSpecificEnvConfig 加载
 function loadConfigFromPluginEnv(pluginEnv) {
     if (!pluginEnv) return;
     if (pluginEnv.EF_HUB_ENDPOINT) efConfig.hubEndpoint = pluginEnv.EF_HUB_ENDPOINT;
@@ -85,44 +76,95 @@ function loadConfigFromPluginEnv(pluginEnv) {
     if (pluginEnv.EF_PROXY) efConfig.proxy = pluginEnv.EF_PROXY;
 }
 
-// ============================================================
-// 数据持久化
-// ============================================================
+function defaultAccountConfig() {
+    return {
+        id: DEFAULT_ACCOUNT_ID,
+        displayName: 'VCP Family 技术账号',
+        hubEndpoint: efConfig.hubEndpoint,
+        accessToken: efConfig.accessToken,
+        heartbeatIntervalMin: efConfig.heartbeatIntervalMin,
+        heartbeatOffsetMin: 0,
+        autoPublish: efConfig.autoPublish,
+        feedLimit: efConfig.feedLimit,
+        proxy: efConfig.proxy,
+        enabled: true,
+        profileDraft: 'Domains: AI agents, multi-agent systems, open-source tooling, knowledge management, RAG systems'
+    };
+}
 
-function loadData() {
+function normalizeAccountId(accountId) {
+    const id = String(accountId || DEFAULT_ACCOUNT_ID).trim();
+    return id || DEFAULT_ACCOUNT_ID;
+}
+
+function loadAccountsConfig() {
+    accountConfigs = {};
+    const fallback = defaultAccountConfig();
+
     try {
-        if (fs.existsSync(DATA_FILE)) {
-            const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-            const data = JSON.parse(raw);
-            state.feedCache = data.feedCache || [];
-            state.unreadMessages = data.unreadMessages || [];
-            state.profile = data.profile || null;
-            state.stats = { ...state.stats, ...(data.stats || {}) };
+        if (!fs.existsSync(ACCOUNTS_CONFIG_FILE)) {
+            accountConfigs[DEFAULT_ACCOUNT_ID] = fallback;
+            return accountConfigs;
+        }
+
+        const parsed = JSON.parse(fs.readFileSync(ACCOUNTS_CONFIG_FILE, 'utf-8'));
+        const list = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed.accounts)
+                ? parsed.accounts
+                : Object.keys(parsed).map(id => ({ id, ...(parsed[id] || {}) }));
+
+        for (const item of list) {
+            if (!item) continue;
+            const id = normalizeAccountId(item.id || item.accountId || item.name);
+            accountConfigs[id] = {
+                id,
+                displayName: item.displayName || item.name || id,
+                hubEndpoint: item.hubEndpoint || efConfig.hubEndpoint,
+                accessToken: item.accessToken || '',
+                heartbeatIntervalMin: parseInt(item.heartbeatIntervalMin) || efConfig.heartbeatIntervalMin,
+                heartbeatOffsetMin: parseInt(item.heartbeatOffsetMin) || 0,
+                autoPublish: item.autoPublish === true,
+                feedLimit: parseInt(item.feedLimit) || efConfig.feedLimit,
+                proxy: item.proxy !== undefined ? item.proxy : efConfig.proxy,
+                enabled: item.enabled !== false,
+                profileDraft: item.profileDraft || ''
+            };
+        }
+
+        if (!accountConfigs[DEFAULT_ACCOUNT_ID]) {
+            accountConfigs[DEFAULT_ACCOUNT_ID] = fallback;
+        } else {
+            accountConfigs[DEFAULT_ACCOUNT_ID] = {
+                ...fallback,
+                ...accountConfigs[DEFAULT_ACCOUNT_ID],
+                accessToken: accountConfigs[DEFAULT_ACCOUNT_ID].accessToken || efConfig.accessToken
+            };
         }
     } catch (e) {
-        console.error('[VCPEigenFlux] 加载数据失败:', e.message);
+        console.error('[VCPEigenFlux] 加载 accounts.config.json 失败，回退单账号:', e.message);
+        accountConfigs[DEFAULT_ACCOUNT_ID] = fallback;
     }
+
+    return accountConfigs;
 }
 
-function saveData() {
-    try {
-        const data = {
-            feedCache: state.feedCache.slice(0, 100),
-            unreadMessages: state.unreadMessages.slice(0, 50),
-            profile: state.profile,
-            stats: state.stats,
-            lastSaved: new Date().toISOString()
-        };
-        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
-    } catch (e) {
-        console.error('[VCPEigenFlux] 保存数据失败:', e.message);
-    }
+function getAccountConfig(accountId) {
+    const id = normalizeAccountId(accountId);
+    return accountConfigs[id] || (id === DEFAULT_ACCOUNT_ID ? defaultAccountConfig() : {
+        ...defaultAccountConfig(),
+        id,
+        displayName: id,
+        accessToken: ''
+    });
 }
+
+// ============================================================
+// 文件与账号状态
+// ============================================================
 
 function ensureDir(dirPath) {
-    if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-    }
+    if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
 }
 
 function safeJsonRead(filePath, fallback) {
@@ -140,6 +182,99 @@ function safeJsonWrite(filePath, data) {
     const tmpFile = `${filePath}.tmp`;
     fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
     fs.renameSync(tmpFile, filePath);
+}
+
+function getAccountRoot(accountId) {
+    const id = normalizeAccountId(accountId);
+    if (id === DEFAULT_ACCOUNT_ID) return __dirname;
+    return path.join(DATA_ROOT, 'accounts', id);
+}
+
+function getAccountPaths(accountId) {
+    const id = normalizeAccountId(accountId);
+    const root = getAccountRoot(id);
+    const isDefault = id === DEFAULT_ACCOUNT_ID;
+    return {
+        id,
+        root,
+        dataFile: isDefault ? LEGACY_DATA_FILE : path.join(root, 'eigenflux-data.json'),
+        archiveRoot: isDefault ? path.join(DATA_ROOT, 'feed-archive') : path.join(root, 'feed-archive'),
+        latestFeedFile: isDefault ? path.join(DATA_ROOT, 'latest-feed.json') : path.join(root, 'latest-feed.json'),
+        archiveStateFile: isDefault ? path.join(DATA_ROOT, 'eigenflux-state.json') : path.join(root, 'eigenflux-state.json'),
+        profileFile: path.join(root, 'profile.json'),
+        statsFile: path.join(root, 'account-stats.json')
+    };
+}
+
+function createAccountState(accountId) {
+    const cfg = getAccountConfig(accountId);
+    const id = normalizeAccountId(cfg.id);
+    return {
+        id,
+        displayName: cfg.displayName || id,
+        config: cfg,
+        paths: getAccountPaths(id),
+        connected: false,
+        lastFeedPoll: null,
+        lastMsgCheck: null,
+        lastArchive: null,
+        feedCache: [],
+        unreadMessages: [],
+        profile: null,
+        heartbeatTimer: null,
+        stats: {
+            feedPollCount: 0,
+            publishCount: 0,
+            msgSendCount: 0,
+            errorCount: 0
+        }
+    };
+}
+
+function ensureAccountState(accountId) {
+    const id = normalizeAccountId(accountId);
+    if (!state.accounts[id]) state.accounts[id] = createAccountState(id);
+    return state.accounts[id];
+}
+
+function loadAccountData(accountId) {
+    const acc = ensureAccountState(accountId);
+    const data = safeJsonRead(acc.paths.dataFile, null);
+    if (!data) return acc;
+    acc.feedCache = data.feedCache || [];
+    acc.unreadMessages = data.unreadMessages || [];
+    acc.profile = data.profile || null;
+    acc.stats = { ...acc.stats, ...(data.stats || {}) };
+    acc.lastFeedPoll = data.lastFeedPoll || null;
+    acc.lastMsgCheck = data.lastMsgCheck || null;
+    acc.lastArchive = data.lastArchive || null;
+    return acc;
+}
+
+function saveAccountData(accountId) {
+    const acc = ensureAccountState(accountId);
+    const data = {
+        accountId: acc.id,
+        displayName: acc.displayName,
+        feedCache: acc.feedCache.slice(0, 100),
+        unreadMessages: acc.unreadMessages.slice(0, 50),
+        profile: acc.profile,
+        stats: acc.stats,
+        lastFeedPoll: acc.lastFeedPoll,
+        lastMsgCheck: acc.lastMsgCheck,
+        lastArchive: acc.lastArchive,
+        lastSaved: new Date().toISOString()
+    };
+    safeJsonWrite(acc.paths.dataFile, data);
+    safeJsonWrite(acc.paths.statsFile, {
+        accountId: acc.id,
+        displayName: acc.displayName,
+        stats: acc.stats,
+        lastFeedPoll: acc.lastFeedPoll,
+        lastMsgCheck: acc.lastMsgCheck,
+        lastArchive: acc.lastArchive,
+        lastSaved: new Date().toISOString()
+    });
 }
 
 function getLocalDateParts(date = new Date()) {
@@ -166,17 +301,20 @@ function getFeedItemId(item) {
     return `hash_${Math.abs(hash)}`;
 }
 
-function archiveFeedItems(items, meta = {}) {
+function archiveFeedItems(accountId, items, meta = {}) {
+    const acc = ensureAccountState(accountId);
     try {
         if (!Array.isArray(items)) return { archived: false, newItems: 0, totalItems: 0 };
 
         const now = new Date();
         const nowIso = now.toISOString();
         const { year, month, dateKey } = getLocalDateParts(now);
-        const dayDir = path.join(ARCHIVE_ROOT, year, month);
+        const dayDir = path.join(acc.paths.archiveRoot, year, month);
         const dailyFile = path.join(dayDir, `${dateKey}-eigenflux-feed.json`);
 
         const archive = safeJsonRead(dailyFile, {
+            accountId: acc.id,
+            displayName: acc.displayName,
             date: dateKey,
             source: 'EigenFlux',
             title: `EigenFlux Feed Archive ${dateKey}`,
@@ -188,8 +326,10 @@ function archiveFeedItems(items, meta = {}) {
             items: []
         });
 
-        const archiveState = safeJsonRead(ARCHIVE_STATE_FILE, {
+        const archiveState = safeJsonRead(acc.paths.archiveStateFile, {
             source: 'EigenFlux',
+            accountId: acc.id,
+            displayName: acc.displayName,
             createdAt: nowIso,
             updatedAt: nowIso,
             totalSeenItems: 0,
@@ -242,7 +382,7 @@ function archiveFeedItems(items, meta = {}) {
             feedCount: items.length,
             newItems: newCount,
             action: meta.action || 'refresh',
-            limit: meta.limit || efConfig.feedLimit
+            limit: meta.limit || acc.config.feedLimit
         };
 
         archiveState.updatedAt = nowIso;
@@ -255,6 +395,8 @@ function archiveFeedItems(items, meta = {}) {
 
         const latest = {
             source: 'EigenFlux',
+            accountId: acc.id,
+            displayName: acc.displayName,
             updatedAt: nowIso,
             date: dateKey,
             feedCount: items.length,
@@ -264,34 +406,35 @@ function archiveFeedItems(items, meta = {}) {
         };
 
         safeJsonWrite(dailyFile, archive);
-        safeJsonWrite(LATEST_FEED_FILE, latest);
-        safeJsonWrite(ARCHIVE_STATE_FILE, archiveState);
+        safeJsonWrite(acc.paths.latestFeedFile, latest);
+        safeJsonWrite(acc.paths.archiveStateFile, archiveState);
 
         return { archived: true, newItems: newCount, totalItems: archive.totalItems, file: dailyFile };
     } catch (e) {
+        acc.stats.errorCount++;
         state.stats.errorCount++;
-        console.error('[VCPEigenFlux] Feed归档失败:', e.message);
+        console.error(`[VCPEigenFlux] Feed归档失败 [${acc.id}]:`, e.message);
         return { archived: false, error: e.message, newItems: 0, totalItems: 0 };
     }
-}
-
-// ============================================================
+}// ============================================================
 // HTTP 客户端（支持代理）
 // ============================================================
 
-function makeRequest(method, apiPath, body = null) {
+function makeRequest(accountId, method, apiPath, body = null) {
+    const acc = ensureAccountState(accountId);
+    const cfg = acc.config;
     return new Promise((resolve, reject) => {
-        const baseUrl = efConfig.hubEndpoint.replace(/\/$/, '');
+        const baseUrl = (cfg.hubEndpoint || efConfig.hubEndpoint).replace(/\/$/, '');
         const fullUrl = `${baseUrl}/api/v1${apiPath}`;
         const parsed = new URL(fullUrl);
 
         const headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
-            'User-Agent': 'VCPEigenFlux/0.1.0'
+            'User-Agent': 'VCPEigenFlux/0.2.0'
         };
-        if (efConfig.accessToken) {
-            headers['Authorization'] = `Bearer ${efConfig.accessToken}`;
+        if (cfg.accessToken) {
+            headers['Authorization'] = `Bearer ${cfg.accessToken}`;
         }
 
         let bodyStr = null;
@@ -300,7 +443,7 @@ function makeRequest(method, apiPath, body = null) {
             headers['Content-Length'] = Buffer.byteLength(bodyStr);
         }
 
-        const useProxy = efConfig.proxy && efConfig.proxy.length > 0;
+        const useProxy = cfg.proxy && cfg.proxy.length > 0;
         const isHttps = parsed.protocol === 'https:';
 
         function doRequest(socket) {
@@ -331,7 +474,7 @@ function makeRequest(method, apiPath, body = null) {
             });
 
             req.on('error', (e) => {
-                state.stats.errorCount++;
+                acc.stats.errorCount++;
                 reject(e);
             });
 
@@ -345,8 +488,7 @@ function makeRequest(method, apiPath, body = null) {
         }
 
         if (useProxy && isHttps) {
-            // HTTPS over HTTP proxy: 先建立 CONNECT 隧道
-            const proxyUrl = new URL(efConfig.proxy);
+            const proxyUrl = new URL(cfg.proxy);
             const connectReq = http.request({
                 hostname: proxyUrl.hostname,
                 port: proxyUrl.port || 10808,
@@ -363,7 +505,7 @@ function makeRequest(method, apiPath, body = null) {
             });
 
             connectReq.on('error', (e) => {
-                state.stats.errorCount++;
+                acc.stats.errorCount++;
                 reject(new Error(`代理连接失败: ${e.message}`));
             });
 
@@ -374,8 +516,7 @@ function makeRequest(method, apiPath, body = null) {
 
             connectReq.end();
         } else if (useProxy && !isHttps) {
-            // HTTP over HTTP proxy: 直接把完整 URL 当 path
-            const proxyUrl = new URL(efConfig.proxy);
+            const proxyUrl = new URL(cfg.proxy);
             const req = http.request({
                 hostname: proxyUrl.hostname,
                 port: proxyUrl.port || 10808,
@@ -396,7 +537,7 @@ function makeRequest(method, apiPath, body = null) {
             });
 
             req.on('error', (e) => {
-                state.stats.errorCount++;
+                acc.stats.errorCount++;
                 reject(e);
             });
 
@@ -408,7 +549,6 @@ function makeRequest(method, apiPath, body = null) {
             if (bodyStr) req.write(bodyStr);
             req.end();
         } else {
-            // 无代理直连
             doRequest(null);
         }
     });
@@ -418,24 +558,27 @@ function makeRequest(method, apiPath, body = null) {
 // EigenFlux API 封装
 // ============================================================
 
-async function feedPoll(limit, action = 'refresh', cursor = '') {
+async function feedPoll(accountId, limit, action = 'refresh', cursor = '') {
+    const acc = ensureAccountState(accountId);
     const params = new URLSearchParams();
-    params.set('limit', String(limit || efConfig.feedLimit));
+    params.set('limit', String(limit || acc.config.feedLimit || efConfig.feedLimit));
     if (action) params.set('action', action);
     if (cursor) params.set('cursor', cursor);
-    const resp = await makeRequest('GET', `/items/feed?${params.toString()}`);
+
+    const resp = await makeRequest(accountId, 'GET', `/items/feed?${params.toString()}`);
     if (resp.status === 200 && resp.data && resp.data.code === 0) {
-        state.feedCache = resp.data.data?.items || [];
-        state.lastFeedPoll = new Date().toISOString();
-        state.stats.feedPollCount++;
-        const archiveResult = archiveFeedItems(state.feedCache, { limit, action, cursor });
-        state.lastArchive = archiveResult;
-        saveData();
+        acc.feedCache = resp.data.data?.items || [];
+        acc.lastFeedPoll = new Date().toISOString();
+        acc.connected = true;
+        acc.stats.feedPollCount++;
+        acc.lastArchive = archiveFeedItems(accountId, acc.feedCache, { limit, action, cursor });
+        saveAccountData(accountId);
     }
     return resp;
 }
 
-async function publish(content, notes = {}) {
+async function publish(accountId, content, notes = {}) {
+    const acc = ensureAccountState(accountId);
     const body = {
         content: content,
         notes: JSON.stringify({
@@ -447,142 +590,184 @@ async function publish(content, notes = {}) {
         }),
         accept_reply: notes.accept_reply !== false
     };
-    const resp = await makeRequest('POST', '/items/publish', body);
+    const resp = await makeRequest(accountId, 'POST', '/items/publish', body);
     if (resp.status === 200) {
-        state.stats.publishCount++;
-        saveData();
+        acc.stats.publishCount++;
+        saveAccountData(accountId);
     }
     return resp;
 }
 
-async function feedGet(itemId) {
-    return await makeRequest('GET', `/items/${itemId}`);
+async function feedGet(accountId, itemId) {
+    return await makeRequest(accountId, 'GET', `/items/${itemId}`);
 }
 
-async function feedback(items) {
-    return await makeRequest('POST', '/items/feedback', { items });
+async function feedback(accountId, items) {
+    return await makeRequest(accountId, 'POST', '/items/feedback', { items });
 }
 
-async function msgSend(content, opts = {}) {
+async function msgSend(accountId, content, opts = {}) {
+    const acc = ensureAccountState(accountId);
     const body = { content };
     if (opts.item_id) body.item_id = opts.item_id;
     if (opts.conv_id) body.conv_id = opts.conv_id;
     if (opts.receiver_id) body.receiver_id = opts.receiver_id;
-    const resp = await makeRequest('POST', '/pm/send', body);
+    const resp = await makeRequest(accountId, 'POST', '/pm/send', body);
     if (resp.status === 200) {
-        state.stats.msgSendCount++;
-        saveData();
+        acc.stats.msgSendCount++;
+        saveAccountData(accountId);
     }
     return resp;
 }
 
-async function msgFetch(limit = 20) {
-    const resp = await makeRequest('GET', `/pm/fetch?limit=${limit}`);
+async function msgFetch(accountId, limit = 20) {
+    const acc = ensureAccountState(accountId);
+    const resp = await makeRequest(accountId, 'GET', `/pm/fetch?limit=${limit}`);
     if (resp.status === 200 && resp.data && resp.data.code === 0) {
-        state.unreadMessages = resp.data.data?.messages || [];
-        state.lastMsgCheck = new Date().toISOString();
-        saveData();
+        acc.unreadMessages = resp.data.data?.messages || [];
+        acc.lastMsgCheck = new Date().toISOString();
+        saveAccountData(accountId);
     }
     return resp;
 }
 
-async function msgHistory(convId, limit = 50) {
-    return await makeRequest('GET', `/pm/history?conv_id=${convId}&limit=${limit}`);
+async function msgHistory(accountId, convId, limit = 50) {
+    return await makeRequest(accountId, 'GET', `/pm/history?conv_id=${convId}&limit=${limit}`);
 }
 
-async function msgClose(convId) {
-    return await makeRequest('POST', '/pm/close', { conv_id: convId });
+async function msgClose(accountId, convId) {
+    return await makeRequest(accountId, 'POST', '/pm/close', { conv_id: convId });
 }
 
-async function profileShow() {
-    const resp = await makeRequest('GET', '/agents/me');
+async function profileShow(accountId) {
+    const acc = ensureAccountState(accountId);
+    const resp = await makeRequest(accountId, 'GET', '/agents/me');
     if (resp.status === 200 && resp.data && resp.data.code === 0) {
-        state.profile = resp.data.data;
-        saveData();
+        acc.profile = resp.data.data;
+        acc.connected = true;
+        saveAccountData(accountId);
     }
     return resp;
 }
 
-async function profileUpdate(bio) {
-    return await makeRequest('PUT', '/agents/profile', { bio });
+async function profileUpdate(accountId, bio) {
+    return await makeRequest(accountId, 'PUT', '/agents/profile', { bio });
 }
 
-async function relationApply(email, greeting = '', remark = '') {
-    return await makeRequest('POST', '/relations/apply', { to_email: email, greeting, remark });
+async function relationApply(accountId, email, greeting = '', remark = '') {
+    return await makeRequest(accountId, 'POST', '/relations/apply', { to_email: email, greeting, remark });
 }
 
-async function relationHandle(requestId, action, remark = '') {
-    return await makeRequest('POST', '/relations/handle', { request_id: requestId, action, remark });
+async function relationHandle(accountId, requestId, action, remark = '') {
+    return await makeRequest(accountId, 'POST', '/relations/handle', { request_id: requestId, action, remark });
 }
 
-async function relationFriends(limit = 20) {
-    return await makeRequest('GET', `/relations/friends?limit=${limit}`);
+async function relationFriends(accountId, limit = 20) {
+    return await makeRequest(accountId, 'GET', `/relations/friends?limit=${limit}`);
 }
 
 // ============================================================
 // 心跳定时器
 // ============================================================
 
-function startHeartbeat() {
-    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
-
-    const intervalMs = Math.max(efConfig.heartbeatIntervalMin, 5) * 60 * 1000;
-    console.log(`[VCPEigenFlux] 心跳启动，间隔 ${efConfig.heartbeatIntervalMin} 分钟`);
-
-    state.heartbeatTimer = setInterval(async () => {
-        await runHeartbeat();
-    }, intervalMs);
-
-    // 启动后延迟 5 秒执行一次初始连接
-    setTimeout(async () => {
-        if (efConfig.accessToken) {
-            try {
-                await profileShow();
-                await runHeartbeat();
-                state.connected = true;
-                console.log(`[VCPEigenFlux] 初始连接成功，Profile: ${state.profile?.profile?.agent_name || 'unknown'}`);
-            } catch (e) {
-                console.error('[VCPEigenFlux] 初始连接失败:', e.message);
-            }
-        } else {
-            console.warn('[VCPEigenFlux] 未配置 EF_ACCESS_TOKEN，心跳未激活');
-        }
-    }, 5000);
+function clearAccountHeartbeat(accountId) {
+    const acc = ensureAccountState(accountId);
+    if (acc.heartbeatTimer) {
+        clearInterval(acc.heartbeatTimer);
+        acc.heartbeatTimer = null;
+    }
 }
 
-async function runHeartbeat() {
-    try {
-        await feedPoll(efConfig.feedLimit);
-        await msgFetch(20);
-        console.log(`[VCPEigenFlux] 心跳完成: Feed ${state.feedCache.length} 条, 未读 ${state.unreadMessages.length} 条`);
+function startHeartbeatForAccount(accountId) {
+    const acc = ensureAccountState(accountId);
+    clearAccountHeartbeat(accountId);
 
-        // WebSocket 推送通知（如果有新内容）
-        if (state.webSocketServer && (state.feedCache.length > 0 || state.unreadMessages.length > 0)) {
+    const intervalMin = Math.max(acc.config.heartbeatIntervalMin || efConfig.heartbeatIntervalMin, 5);
+    const intervalMs = intervalMin * 60 * 1000;
+    const offsetMs = Math.max(parseInt(acc.config.heartbeatOffsetMin) || 0, 0) * 60 * 1000;
+
+    console.log(`[VCPEigenFlux] 心跳启动 [${acc.id}]，间隔 ${intervalMin} 分钟，偏移 ${Math.round(offsetMs / 60000)} 分钟`);
+
+    acc.heartbeatTimer = setInterval(async () => {
+        await runHeartbeat(accountId);
+    }, intervalMs);
+
+    setTimeout(async () => {
+        const token = acc.config.accessToken || (acc.id === DEFAULT_ACCOUNT_ID ? efConfig.accessToken : '');
+        if (token) {
+            try {
+                await profileShow(accountId);
+                await runHeartbeat(accountId);
+                acc.connected = true;
+                console.log(`[VCPEigenFlux] 初始连接成功 [${acc.id}]，Profile: ${acc.profile?.profile?.agent_name || acc.displayName || 'unknown'}`);
+            } catch (e) {
+                console.error(`[VCPEigenFlux] 初始连接失败 [${acc.id}]:`, e.message);
+            }
+        } else {
+            console.warn(`[VCPEigenFlux] 账号 ${acc.id} 未配置 accessToken，心跳未激活`);
+        }
+    }, 5000 + offsetMs);
+}
+
+async function runHeartbeat(accountId = DEFAULT_ACCOUNT_ID) {
+    const acc = ensureAccountState(accountId);
+    try {
+        await feedPoll(accountId, acc.config.feedLimit);
+        await msgFetch(accountId, 20);
+        console.log(`[VCPEigenFlux] 心跳完成 [${acc.id}]: Feed ${acc.feedCache.length} 条, 未读 ${acc.unreadMessages.length} 条`);
+
+        if (state.webSocketServer && (acc.feedCache.length > 0 || acc.unreadMessages.length > 0)) {
             try {
                 state.webSocketServer.broadcast(JSON.stringify({
                     type: 'eigenflux_notification',
                     data: {
-                        feedCount: state.feedCache.length,
-                        unreadCount: state.unreadMessages.length,
+                        accountId: acc.id,
+                        displayName: acc.displayName,
+                        feedCount: acc.feedCache.length,
+                        unreadCount: acc.unreadMessages.length,
                         timestamp: new Date().toISOString()
                     }
                 }));
-            } catch (wsErr) {
-                // WebSocket 推送失败不影响主流程
-            }
+            } catch (wsErr) {}
         }
     } catch (e) {
-        console.error('[VCPEigenFlux] 心跳错误:', e.message);
+        console.error(`[VCPEigenFlux] 心跳错误 [${acc.id}]:`, e.message);
+        acc.stats.errorCount++;
         state.stats.errorCount++;
     }
 }
 
-function stopHeartbeat() {
-    if (state.heartbeatTimer) {
-        clearInterval(state.heartbeatTimer);
-        state.heartbeatTimer = null;
-        console.log('[VCPEigenFlux] 心跳已停止');
+function startHeartbeat() {
+    const list = Object.values(accountConfigs || {});
+    for (const account of list) {
+        if (account.enabled !== false) {
+            startHeartbeatForAccount(account.id);
+        }
     }
+}
+
+function stopHeartbeat() {
+    for (const acc of Object.values(state.accounts || {})) {
+        if (acc && acc.heartbeatTimer) {
+            clearInterval(acc.heartbeatTimer);
+            acc.heartbeatTimer = null;
+        }
+    }
+    console.log('[VCPEigenFlux] 所有账号心跳已停止');
+}
+
+// ============================================================
+// 格式化结果
+// ============================================================
+
+function formatResult(success, message, data = null) {
+    const result = { status: success ? 'success' : 'error' };
+    if (success) {
+        result.result = data ? `${message}\n\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\`` : message;
+    } else {
+        result.error = message;
+    }
+    return result;
 }
 
 // ============================================================
@@ -591,33 +776,35 @@ function stopHeartbeat() {
 
 async function processToolCall(args) {
     const command = args.command || '';
+    const accountId = normalizeAccountId(args.account || args.account_id || DEFAULT_ACCOUNT_ID);
+    const acc = ensureAccountState(accountId);
 
     try {
         switch (command) {
             case 'EFPublish': {
                 if (!args.content) return formatResult(false, '缺少 content 参数');
-                const domains = args.domains ? args.domains.split(',').map(d => d.trim()) : [];
-                const resp = await publish(args.content, {
+                const domains = args.domains ? args.domains.split(',').map(d => d.trim()).filter(Boolean) : [];
+                const resp = await publish(accountId, args.content, {
                     type: args.type || 'info',
                     domains,
                     summary: args.summary || '',
                     accept_reply: args.accept_reply !== 'false'
                 });
-                return formatResult(true, '广播发布成功', resp.data);
+                return formatResult(true, `账号[${accountId}]广播发布成功`, resp.data);
             }
 
             case 'EFFeed': {
                 const resp = await feedPoll(
-                    parseInt(args.limit) || efConfig.feedLimit,
+                    accountId,
+                    parseInt(args.limit) || acc.config.feedLimit,
                     args.action || 'refresh',
                     args.cursor || ''
                 );
                 const items = resp.data?.data?.items || [];
                 if (items.length === 0) {
-                    return formatResult(true, 'Feed 当前为空，可能是新账号尚未匹配到内容，或已全部消费完毕。');
+                    return formatResult(true, `账号[${accountId}] Feed 当前为空，可能是尚未匹配到内容，或已全部消费完毕。`);
                 }
-                // 格式化 Feed 为 Agent 友好的文本
-                let feedText = `## EigenFlux Feed (${items.length} 条)\n\n`;
+                let feedText = `## EigenFlux Feed [${accountId}] (${items.length} 条)\n\n`;
                 items.forEach((item, i) => {
                     feedText += `### ${i + 1}. [${item.broadcast_type || 'info'}] ${item.summary || '(无摘要)'}\n`;
                     feedText += `- 作者: ${item.author_name || 'unknown'}\n`;
@@ -634,26 +821,29 @@ async function processToolCall(args) {
                 switch (action) {
                     case 'send': {
                         if (!args.content) return formatResult(false, '缺少 content 参数');
-                        const resp = await msgSend(args.content, {
-                            item_id: args.item_id, conv_id: args.conv_id, receiver_id: args.receiver_id
+                        const resp = await msgSend(accountId, args.content, {
+                            item_id: args.item_id,
+                            conv_id: args.conv_id,
+                            receiver_id: args.receiver_id
                         });
                         return formatResult(true, '消息发送成功', resp.data);
                     }
                     case 'fetch': {
-                        const resp = await msgFetch(parseInt(args.limit) || 20);
+                        const resp = await msgFetch(accountId, parseInt(args.limit) || 20);
                         return formatResult(true, '未读消息获取成功', resp.data);
                     }
                     case 'history': {
                         if (!args.conv_id) return formatResult(false, '缺少 conv_id 参数');
-                        const resp = await msgHistory(args.conv_id, parseInt(args.limit) || 50);
+                        const resp = await msgHistory(accountId, args.conv_id, parseInt(args.limit) || 50);
                         return formatResult(true, '对话历史获取成功', resp.data);
                     }
                     case 'close': {
                         if (!args.conv_id) return formatResult(false, '缺少 conv_id 参数');
-                        const resp = await msgClose(args.conv_id);
+                        const resp = await msgClose(accountId, args.conv_id);
                         return formatResult(true, '对话已关闭', resp.data);
                     }
-                    default: return formatResult(false, `未知 action: ${action}`);
+                    default:
+                        return formatResult(false, `未知 action: ${action}`);
                 }
             }
 
@@ -663,70 +853,106 @@ async function processToolCall(args) {
                 switch (action) {
                     case 'apply': {
                         if (!args.email) return formatResult(false, '缺少 email 参数');
-                        const resp = await relationApply(args.email, args.greeting || '', args.remark || '');
+                        const resp = await relationApply(accountId, args.email, args.greeting || '', args.remark || '');
                         return formatResult(true, '好友申请已发送', resp.data);
                     }
                     case 'handle': {
                         if (!args.request_id || !args.handle_action) return formatResult(false, '缺少 request_id 或 handle_action');
-                        const resp = await relationHandle(args.request_id, args.handle_action, args.remark || '');
+                        const resp = await relationHandle(accountId, args.request_id, args.handle_action, args.remark || '');
                         return formatResult(true, '好友请求已处理', resp.data);
                     }
                     case 'list': {
-                        const resp = await relationFriends(parseInt(args.limit) || 20);
+                        const resp = await relationFriends(accountId, parseInt(args.limit) || 20);
                         return formatResult(true, '好友列表获取成功', resp.data);
                     }
-                    default: return formatResult(false, `未知 action: ${action}`);
+                    default:
+                        return formatResult(false, `未知 action: ${action}`);
                 }
             }
 
             case 'EFProfile': {
                 if (args.bio) {
-                    const resp = await profileUpdate(args.bio);
+                    const resp = await profileUpdate(accountId, args.bio);
                     return formatResult(true, 'Profile 更新成功', resp.data);
                 } else {
-                    const resp = await profileShow();
+                    const resp = await profileShow(accountId);
                     return formatResult(true, 'Profile 信息', resp.data);
                 }
             }
 
             case 'EFStatus': {
-                return formatResult(true, 'EigenFlux 连接状态', {
-                    connected: state.connected,
-                    hubEndpoint: efConfig.hubEndpoint,
-                    hasToken: !!efConfig.accessToken,
-                    heartbeatInterval: `${efConfig.heartbeatIntervalMin}min`,
-                    heartbeatRunning: !!state.heartbeatTimer,
-                    lastFeedPoll: state.lastFeedPoll,
-                    lastMsgCheck: state.lastMsgCheck,
-                    feedCacheCount: state.feedCache.length,
-                    unreadMsgCount: state.unreadMessages.length,
-                    profile: state.profile?.profile ? {
-                        agent_name: state.profile.profile.agent_name,
-                        email: state.profile.profile.email,
-                        agent_id: state.profile.profile.agent_id
-                    } : null,
-                    stats: state.stats,
-                    uptime: state.startTime ? `${Math.round((Date.now() - state.startTime) / 60000)} min` : 'N/A'
+                if (args.account) {
+                    return formatResult(true, `账号[${accountId}]连接状态`, {
+                        accountId: acc.id,
+                        displayName: acc.displayName,
+                        connected: acc.connected,
+                        heartbeatRunning: !!acc.heartbeatTimer,
+                        lastFeedPoll: acc.lastFeedPoll,
+                        lastMsgCheck: acc.lastMsgCheck,
+                        feedCacheCount: acc.feedCache.length,
+                        unreadMsgCount: acc.unreadMessages.length,
+                        profile: acc.profile?.profile ? {
+                            agent_name: acc.profile.profile.agent_name,
+                            email: acc.profile.profile.email,
+                            agent_id: acc.profile.profile.agent_id
+                        } : null,
+                        stats: acc.stats,
+                        config: {
+                            heartbeatIntervalMin: acc.config.heartbeatIntervalMin,
+                            heartbeatOffsetMin: acc.config.heartbeatOffsetMin,
+                            feedLimit: acc.config.feedLimit,
+                            enabled: acc.config.enabled !== false
+                        }
+                    });
+                }
+
+                const summary = Object.values(state.accounts || {}).map(a => ({
+                    accountId: a.id,
+                    displayName: a.displayName,
+                    connected: a.connected,
+                    heartbeatRunning: !!a.heartbeatTimer,
+                    lastFeedPoll: a.lastFeedPoll,
+                    lastMsgCheck: a.lastMsgCheck,
+                    feedCacheCount: a.feedCache.length,
+                    unreadMsgCount: a.unreadMessages.length,
+                    stats: a.stats,
+                    enabled: a.config.enabled !== false
+                }));
+
+                return formatResult(true, 'EigenFlux 多账号状态', {
+                    defaultAccountId: DEFAULT_ACCOUNT_ID,
+                    accounts: summary,
+                    globalStats: state.stats,
+                    hasLegacyConfig: !!efConfig.accessToken
                 });
             }
 
+            case 'EFAccounts': {
+                const list = Object.values(accountConfigs || {}).map(cfg => {
+                    const a = ensureAccountState(cfg.id);
+                    return {
+                        accountId: a.id,
+                        displayName: a.displayName,
+                        enabled: cfg.enabled !== false,
+                        hasToken: !!(cfg.accessToken || (a.id === DEFAULT_ACCOUNT_ID && efConfig.accessToken)),
+                        heartbeatIntervalMin: cfg.heartbeatIntervalMin,
+                        heartbeatOffsetMin: cfg.heartbeatOffsetMin || 0,
+                        feedLimit: cfg.feedLimit,
+                        latestFeedFile: a.paths.latestFeedFile,
+                        archiveStateFile: a.paths.archiveStateFile
+                    };
+                });
+                return formatResult(true, 'EigenFlux 账号清单', { accounts: list });
+            }
+
             default:
-                return formatResult(false, `未知命令: ${command}。支持的命令: EFPublish, EFFeed, EFMessage, EFFriend, EFProfile, EFStatus`);
+                return formatResult(false, `未知命令: ${command}。支持的命令: EFPublish, EFFeed, EFMessage, EFFriend, EFProfile, EFStatus, EFAccounts`);
         }
     } catch (e) {
+        acc.stats.errorCount++;
         state.stats.errorCount++;
         return formatResult(false, `执行出错: ${e.message}`);
     }
-}
-
-function formatResult(success, message, data = null) {
-    const result = { status: success ? 'success' : 'error' };
-    if (success) {
-        result.result = data ? `${message}\n\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\`` : message;
-    } else {
-        result.error = message;
-    }
-    return result;
 }
 
 // ============================================================
@@ -736,23 +962,26 @@ function formatResult(success, message, data = null) {
 function initialize(config) {
     console.log('[VCPEigenFlux] 初始化中...');
 
-    // 从 config.env 加载
     loadConfigFromEnv();
-    // 从 PluginManager 传入的环境变量覆盖
     loadConfigFromPluginEnv(config);
+    loadAccountsConfig();
 
-    loadData();
+    ensureAccountState(DEFAULT_ACCOUNT_ID);
+    loadAccountData(DEFAULT_ACCOUNT_ID);
+
+    for (const id of Object.keys(accountConfigs || {})) {
+        ensureAccountState(id);
+        if (id !== DEFAULT_ACCOUNT_ID) loadAccountData(id);
+    }
+
     state.startTime = Date.now();
-
-    // 启动心跳
     startHeartbeat();
 
-    console.log(`[VCPEigenFlux] 初始化完成 | Hub: ${efConfig.hubEndpoint} | Token: ${efConfig.accessToken ? 'configured' : 'MISSING'}`);
+    console.log(`[VCPEigenFlux] 初始化完成 | Default Hub: ${efConfig.hubEndpoint} | Accounts: ${Object.keys(accountConfigs || {}).length}`);
 }
 
 // ============================================================
 // registerApiRoutes — PluginManager 注册 HTTP 路由
-// 签名: (router, config, projectBasePath, webSocketServer)
 // ============================================================
 
 function registerApiRoutes(router, config, projectBasePath, wss) {
@@ -761,49 +990,100 @@ function registerApiRoutes(router, config, projectBasePath, wss) {
         console.log('[VCPEigenFlux] WebSocketServer 已注入');
     }
 
-    // GET /eigenflux/status — 连接状态
     router.get('/status', (req, res) => {
+        const accountId = normalizeAccountId(req.query.account || DEFAULT_ACCOUNT_ID);
+        const acc = ensureAccountState(accountId);
+
+        if (req.query.account) {
+            res.json({
+                accountId: acc.id,
+                displayName: acc.displayName,
+                connected: acc.connected,
+                heartbeatRunning: !!acc.heartbeatTimer,
+                lastFeedPoll: acc.lastFeedPoll,
+                lastMsgCheck: acc.lastMsgCheck,
+                feedCacheCount: acc.feedCache.length,
+                unreadMsgCount: acc.unreadMessages.length,
+                profile: acc.profile?.profile ? {
+                    agent_name: acc.profile.profile.agent_name,
+                    email: acc.profile.profile.email,
+                    agent_id: acc.profile.profile.agent_id
+                } : null,
+                stats: acc.stats,
+                config: acc.config
+            });
+            return;
+        }
+
         res.json({
-            connected: state.connected,
-            hubEndpoint: efConfig.hubEndpoint,
-            hasToken: !!efConfig.accessToken,
-            heartbeatRunning: !!state.heartbeatTimer,
-            lastFeedPoll: state.lastFeedPoll,
-            lastMsgCheck: state.lastMsgCheck,
-            feedCacheCount: state.feedCache.length,
-            unreadMsgCount: state.unreadMessages.length,
-            stats: state.stats,
+            defaultAccountId: DEFAULT_ACCOUNT_ID,
+            accounts: Object.values(state.accounts || {}).map(a => ({
+                accountId: a.id,
+                displayName: a.displayName,
+                connected: a.connected,
+                heartbeatRunning: !!a.heartbeatTimer,
+                lastFeedPoll: a.lastFeedPoll,
+                lastMsgCheck: a.lastMsgCheck,
+                feedCacheCount: a.feedCache.length,
+                unreadMsgCount: a.unreadMessages.length,
+                stats: a.stats
+            })),
+            globalStats: state.stats,
             uptime: state.startTime ? `${Math.round((Date.now() - state.startTime) / 60000)} min` : 'N/A'
         });
     });
 
-    // GET /eigenflux/feed — Feed 缓存
     router.get('/feed', (req, res) => {
+        const accountId = normalizeAccountId(req.query.account || DEFAULT_ACCOUNT_ID);
+        const acc = ensureAccountState(accountId);
         const limit = parseInt(req.query.limit) || 20;
         res.json({
-            items: state.feedCache.slice(0, limit),
-            total: state.feedCache.length,
-            lastPoll: state.lastFeedPoll
+            accountId: acc.id,
+            items: acc.feedCache.slice(0, limit),
+            total: acc.feedCache.length,
+            lastPoll: acc.lastFeedPoll
         });
     });
 
-    // GET /eigenflux/messages — 未读消息
     router.get('/messages', (req, res) => {
+        const accountId = normalizeAccountId(req.query.account || DEFAULT_ACCOUNT_ID);
+        const acc = ensureAccountState(accountId);
         res.json({
-            messages: state.unreadMessages,
-            total: state.unreadMessages.length,
-            lastCheck: state.lastMsgCheck
+            accountId: acc.id,
+            messages: acc.unreadMessages,
+            total: acc.unreadMessages.length,
+            lastCheck: acc.lastMsgCheck
         });
     });
 
-    // POST /eigenflux/heartbeat — 手动触发心跳
     router.post('/heartbeat', async (req, res) => {
         try {
-            await runHeartbeat();
-            res.json({ success: true, message: '心跳手动触发完成' });
+            const accountId = normalizeAccountId(req.body?.account || req.query?.account || DEFAULT_ACCOUNT_ID);
+            await runHeartbeat(accountId);
+            res.json({ success: true, message: `账号[${accountId}]心跳手动触发完成` });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
+    });
+
+    router.get('/accounts', (req, res) => {
+        res.json({
+            defaultAccountId: DEFAULT_ACCOUNT_ID,
+            accounts: Object.values(accountConfigs || {}).map(cfg => {
+                const a = ensureAccountState(cfg.id);
+                return {
+                    accountId: a.id,
+                    displayName: a.displayName,
+                    enabled: cfg.enabled !== false,
+                    hasToken: !!(cfg.accessToken || (a.id === DEFAULT_ACCOUNT_ID && efConfig.accessToken)),
+                    heartbeatIntervalMin: cfg.heartbeatIntervalMin,
+                    heartbeatOffsetMin: cfg.heartbeatOffsetMin || 0,
+                    feedLimit: cfg.feedLimit,
+                    latestFeedFile: a.paths.latestFeedFile,
+                    archiveStateFile: a.paths.archiveStateFile
+                };
+            })
+        });
     });
 
     console.log('[VCPEigenFlux] API 路由已注册: /eigenflux/*');

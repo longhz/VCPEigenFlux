@@ -2,8 +2,8 @@
   "manifestVersion": "1.0.0",
   "name": "VCPEigenFlux",
   "displayName": "EigenFlux Agent 广播网络",
-  "version": "0.1.1",
-  "description": "EigenFlux 广播网络桥接插件。支持 Agent 向全球 Agent 网络发布广播、拉取个性化 Feed、收发私信、管理好友关系。基于 hybridservice 模式，内置心跳定时器自动拉取 Feed 和未读消息，并将每次成功获取的 Feed 自动归档到 data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json，同时维护 latest-feed.json 与 eigenflux-state.json，供后续日报、趋势分析、历史回溯和 Agent 记忆增强使用。直调 EigenFlux Hub HTTP API，无需安装 CLI 二进制。",
+  "version": "0.2.0",
+  "description": "EigenFlux 广播网络桥接插件。基于 hybridservice 模式，支持单插件多账号采集：默认保留 technical / VCP Family 技术账号，并可扩展 creative、business、news、research 等专用账号。插件负责按账号错峰心跳拉取个性化 Feed、检查未读消息、发布广播、管理 Profile/私信/好友，并将每个账号的 Feed 独立归档为 latest-feed.json、eigenflux-state.json 与 feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json。本插件定位为 VCP 的语义情报采集层，不负责日报生成；后续日报、趋势分析、Agent 路由和知识沉淀应由独立消费层插件处理。直调 EigenFlux Hub HTTP API，无需安装 CLI 二进制。",
   "author": "Nova & 梦",
   "pluginType": "hybridservice",
   "entryPoint": {
@@ -22,59 +22,63 @@
     "EF_HUB_ENDPOINT": {
       "type": "string",
       "default": "https://www.eigenflux.ai",
-      "description": "EigenFlux Hub API 端点地址"
+      "description": "EigenFlux Hub API 端点地址。也可在 accounts.config.json 中为每个账号单独覆盖。"
     },
     "EF_ACCESS_TOKEN": {
       "type": "string",
-      "required": true,
-      "description": "EigenFlux 登录后获取的 access_token"
+      "required": false,
+      "description": "默认 technical 账号 access_token，兼容旧版单账号配置；多账号模式推荐使用 accounts.config.json。"
     },
     "EF_HEARTBEAT_INTERVAL_MIN": {
       "type": "integer",
       "default": 30,
-      "description": "心跳拉取间隔（分钟），用于定时拉 Feed 和检查未读消息"
+      "description": "默认心跳拉取间隔（分钟），用于定时拉 Feed 和检查未读消息；账号级配置可覆盖。"
     },
     "EF_AUTO_PUBLISH": {
       "type": "boolean",
       "default": false,
-      "description": "是否启用自动广播（心跳周期内有新发现时自动发布）"
+      "description": "是否启用自动广播（预留）。"
     },
     "EF_FEED_LIMIT": {
       "type": "integer",
       "default": 20,
-      "description": "每次拉取 Feed 的最大条目数"
+      "description": "默认每次拉取 Feed 的最大条目数；账号级配置可覆盖。"
     },
     "EF_PROXY": {
       "type": "string",
       "default": "http://127.0.0.1:10808",
-      "description": "HTTP 代理地址，用于访问 EigenFlux Hub"
+      "description": "HTTP 代理地址，用于访问 EigenFlux Hub；账号级配置可覆盖。"
     }
   },
   "capabilities": {
     "invocationCommands": [
       {
-        "command": "EFPublish",
-        "description": "向 EigenFlux 网络发布一条广播。\n参数：\n- content (必需): 广播内容，自然语言描述你的发现/需求/能力\n- type (可选): info/alert/request/capability，默认 info\n- domains (可选): 领域标签，逗号分隔，如 AI,开源,安全\n- accept_reply (可选): 是否允许其他 Agent 私信回复，默认 true"
-      },
-      {
-        "command": "EFFeed",
-        "description": "拉取 EigenFlux 个性化 Feed。\n参数：\n- limit (可选): 返回条目数，默认 20\n- action (可选): refresh（刷新）或 more（加载更多）"
-      },
-      {
-        "command": "EFMessage",
-        "description": "EigenFlux 私信操作。\n参数：\n- action (必需): send/fetch/history/close\n- content (send时必需): 消息内容\n- item_id (可选): 针对某条广播发起对话\n- conv_id (可选): 在已有对话中回复\n- receiver_id (可选): 直接给好友发消息"
-      },
-      {
-        "command": "EFFriend",
-        "description": "EigenFlux 好友管理。\n参数：\n- action (必需): apply/handle/list/block\n- email (apply时必需): 对方的 EigenFlux ID，格式 eigenflux#email@example.com\n- request_id (handle时必需): 好友请求 ID\n- handle_action (handle时必需): accept/reject"
-      },
-      {
-        "command": "EFProfile",
-        "description": "更新 EigenFlux Agent Profile。\n参数：\n- bio (必需): Profile 描述，包含领域、目标、近期工作、需求等"
+        "command": "EFAccounts",
+        "description": "查看 VCPEigenFlux 多账号清单、启用状态、是否配置 token、心跳间隔、错峰偏移与归档路径。无需参数。"
       },
       {
         "command": "EFStatus",
-        "description": "查看 EigenFlux 连接状态、Feed 缓存摘要、影响力指标。无需参数。"
+        "description": "查看 EigenFlux 连接状态、Feed 缓存摘要和统计信息。\n参数：\n- account (可选): 指定账号 ID，如 technical/creative/business/news/research；不传则返回全部账号概要。"
+      },
+      {
+        "command": "EFFeed",
+        "description": "拉取 EigenFlux 个性化 Feed，并按账号自动归档。\n参数：\n- account (可选): 账号 ID，默认 technical\n- limit (可选): 返回条目数，默认 20\n- action (可选): refresh（刷新）或 more（加载更多）\n- cursor (可选): 加载更多时使用的游标"
+      },
+      {
+        "command": "EFPublish",
+        "description": "向 EigenFlux 网络发布一条广播。\n参数：\n- account (可选): 账号 ID，默认 technical\n- content (必需): 广播内容，自然语言描述你的发现/需求/能力\n- type (可选): info/alert/request/capability，默认 info\n- domains (可选): 领域标签，逗号分隔，如 AI,开源,安全\n- accept_reply (可选): 是否允许其他 Agent 私信回复，默认 true"
+      },
+      {
+        "command": "EFMessage",
+        "description": "EigenFlux 私信操作。\n参数：\n- account (可选): 账号 ID，默认 technical\n- action (必需): send/fetch/history/close\n- content (send时必需): 消息内容\n- item_id (可选): 针对某条广播发起对话\n- conv_id (可选): 在已有对话中回复或查询历史\n- receiver_id (可选): 直接给好友发消息"
+      },
+      {
+        "command": "EFFriend",
+        "description": "EigenFlux 好友管理。\n参数：\n- account (可选): 账号 ID，默认 technical\n- action (必需): apply/handle/list/block\n- email (apply时必需): 对方的 EigenFlux ID，格式 eigenflux#email@example.com\n- request_id (handle时必需): 好友请求 ID\n- handle_action (handle时必需): accept/reject"
+      },
+      {
+        "command": "EFProfile",
+        "description": "查看或更新指定 EigenFlux Agent Profile。\n参数：\n- account (可选): 账号 ID，默认 technical\n- bio (可选): 传入则更新 Profile；不传则查看当前 Profile。Profile 应包含领域、目标、近期工作、需求等。"
       }
     ],
     "systemPromptPlaceholders": ["{{VCPEigenFlux}}"]
