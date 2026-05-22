@@ -776,10 +776,6 @@ function startHeartbeatForAccount(accountId) {
 
     console.log(`[VCPEigenFlux] 心跳启动 [${acc.id}]，间隔 ${intervalMin} 分钟，偏移 ${Math.round(offsetMs / 60000)} 分钟`);
 
-    acc.heartbeatTimer = setInterval(async () => {
-        await runHeartbeat(accountId);
-    }, intervalMs);
-
     setTimeout(async () => {
         const token = acc.config.accessToken || (acc.id === DEFAULT_ACCOUNT_ID ? efConfig.accessToken : '');
         if (token) {
@@ -791,6 +787,10 @@ function startHeartbeatForAccount(accountId) {
             } catch (e) {
                 console.error(`[VCPEigenFlux] 初始连接失败 [${acc.id}]:`, e.message);
             }
+            // 在初始偏移触发后，再建立持久心跳定时器，实现真正的错峰
+            acc.heartbeatTimer = setInterval(async () => {
+                await runHeartbeat(accountId);
+            }, intervalMs);
         } else {
             console.warn(`[VCPEigenFlux] 账号 ${acc.id} 未配置 accessToken，心跳未激活`);
         }

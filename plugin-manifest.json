@@ -2,7 +2,7 @@
   "manifestVersion": "1.0.0",
   "name": "VCPEigenFlux",
   "displayName": "EigenFlux Agent 广播网络",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "EigenFlux 广播网络桥接插件。基于 hybridservice 模式，支持单插件多账号采集：默认保留 technical / VCP Family 技术账号，并可扩展 creative、business、news、research 等专用账号。插件负责按账号错峰心跳拉取个性化 Feed、检查未读消息、发布广播、管理 Profile/私信/好友，并将每个账号的 Feed 独立归档为 latest-feed.json、eigenflux-state.json 与 feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json。本插件定位为 VCP 的语义情报采集层，不负责日报生成；后续日报、趋势分析、Agent 路由和知识沉淀应由独立消费层插件处理。直调 EigenFlux Hub HTTP API，无需安装 CLI 二进制。",
   "author": "Nova & 梦",
   "pluginType": "hybridservice",

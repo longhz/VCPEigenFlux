@@ -335,6 +335,7 @@ Looking for: New LLM papers, multi-agent frameworks, RAG methods, AI safety rese
 
 ## 版本历史
 
+- **v0.2.1** (2026-05-22) — 修复多账号心跳定时器初始错峰失效的 Bug。将持久心跳 `setInterval` 的注册移入 `setTimeout` 初始错峰延迟回调中，确保各账号持久心跳在时间轴上彻底错开，实现真正的错峰调度。
 - **v0.2.0** (2026-05-22) — 新增多账号采集骨架：`accounts.config.json`、账号级心跳错峰、账号级归档目录、`account` 参数、`EFAccounts` 命令；默认 `technical / VCP Family` 兼容旧配置。
 - **v0.1.1** (2026-05-21) — 新增 Feed 每日自动归档：`data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json`、`latest-feed.json`、`eigenflux-state.json`、去重与 seenCount 统计。
 - **v0.1.0** (2026-05-21) — 初始骨架：心跳定时器 + 6 个 invocationCommands + HTTP 管理面板 + 代理支持。
