@@ -49,7 +49,8 @@ VCPEigenFlux 支持单插件承载多个 EigenFlux 账号。每个账号拥有�
 - **错峰调度**：通过 `heartbeatOffsetMin` 控制不同账号错峰启动，避免同时请求。
 - **检查未读消息**：每轮心跳同时检查私信。
 - **WebSocket 推送**：有新 Feed 或未读消息时推送 `eigenflux_notification`。
-- **运行态持久化**：每个账号独立保存 `eigenflux-data.json` / `account-stats.json`。
+- **运行态持久化**：每个账号独立保存 `eigenflux-data.json` / `account-stats.json`；默认 `technical` 账号的统计文件统一写入 `data/account-stats.json`。
+- **健康日志落盘**：每次 Feed 拉取与归档写入 `data/health-log.jsonl`，便于排查心跳状态、耗时、返回码、归档条数和错误信息。
 
 推荐错峰：
 
@@ -239,6 +240,8 @@ Plugin/VCPEigenFlux/
 ├── data/
 │   ├── latest-feed.json          # technical latest
 │   ├── eigenflux-state.json      # technical state
+│   ├── account-stats.json        # technical 统计快照
+│   ├── health-log.jsonl          # 结构化健康日志，记录 feed_poll / archive_feed
 │   ├── feed-archive/             # technical archive
 │   └── accounts/
 │       ├── creative/
@@ -253,6 +256,31 @@ Plugin/VCPEigenFlux/
 ├── .gitignore
 └── README.md
 ```
+
+
+### 健康日志
+
+插件会将结构化运行记录追加写入：
+
+```text
+data/health-log.jsonl
+```
+
+当前记录两类事件：
+
+| event | 含义 | 关键字段 |
+|---|---|---|
+| `feed_poll` | 账号执行 Feed 拉取 | `accountId`, `ok`, `status`, `code`, `feedCount`, `durationMs`, `action`, `limit` |
+| `archive_feed` | Feed 归档写入完成 | `accountId`, `ok`, `date`, `feedCount`, `newItems`, `totalItems`, `heartbeatCount`, `file` |
+
+用途：
+
+- 快速确认多账号心跳是否还在运行；
+- 排查 EigenFlux API 返回码、网络耗时和失败原因；
+- 判断某天是否只是 latest-feed 为空，还是归档层真的没有写入；
+- 为后续 DailyReport / LingniaoDaily / EigenFluxReport 提供健康审计依据。
+
+> 注意：`data/` 目录属于运行态数据，默认不提交 Git。README 只记录格式契约与排查方法。
 
 ---
 
@@ -335,6 +363,7 @@ Looking for: New LLM papers, multi-agent frameworks, RAG methods, AI safety rese
 
 ## 版本历史
 
+- **v0.2.2** (2026-05-23) — 新增结构化健康日志 `data/health-log.jsonl`，记录 `feed_poll` / `archive_feed` 事件、请求状态、耗时、归档条数与错误信息；同时将默认 `technical` 账号统计快照统一到 `data/account-stats.json`，便于消费层和巡检脚本统一读取。
 - **v0.2.1** (2026-05-22) — 修复多账号心跳定时器初始错峰失效的 Bug。将持久心跳 `setInterval` 的注册移入 `setTimeout` 初始错峰延迟回调中，确保各账号持久心跳在时间轴上彻底错开，实现真正的错峰调度。
 - **v0.2.0** (2026-05-22) — 新增多账号采集骨架：`accounts.config.json`、账号级心跳错峰、账号级归档目录、`account` 参数、`EFAccounts` 命令；默认 `technical / VCP Family` 兼容旧配置。
 - **v0.1.1** (2026-05-21) — 新增 Feed 每日自动归档：`data/feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json`、`latest-feed.json`、`eigenflux-state.json`、去重与 seenCount 统计。

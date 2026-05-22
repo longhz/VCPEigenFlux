@@ -19,6 +19,7 @@ const DATA_ROOT = path.join(__dirname, 'data');
 const LEGACY_DATA_FILE = path.join(__dirname, 'eigenflux-data.json');
 const LATEST_ALL_FEEDS_FILE = path.join(DATA_ROOT, 'latest-all-feeds.json');
 const ACCOUNTS_STATE_FILE = path.join(DATA_ROOT, 'eigenflux-accounts-state.json');
+const HEALTH_LOG_FILE = path.join(DATA_ROOT, 'health-log.jsonl');
 
 let efConfig = {
     hubEndpoint: 'https://www.eigenflux.ai',
@@ -186,6 +187,23 @@ function safeJsonWrite(filePath, data) {
     fs.renameSync(tmpFile, filePath);
 }
 
+function appendHealthLog(accountId, event = {}) {
+    try {
+        const acc = ensureAccountState(accountId);
+        const row = {
+            at: new Date().toISOString(),
+            accountId: acc.id,
+            displayName: acc.displayName,
+            ...event
+        };
+        ensureDir(path.dirname(HEALTH_LOG_FILE));
+        fs.appendFileSync(HEALTH_LOG_FILE, JSON.stringify(row) + '\n', 'utf-8');
+    } catch (e) {
+        console.error('[VCPEigenFlux] 健康日志写入失败:', e.message);
+    }
+}
+
+
 function getAccountRoot(accountId) {
     const id = normalizeAccountId(accountId);
     if (id === DEFAULT_ACCOUNT_ID) return __dirname;
@@ -204,7 +222,7 @@ function getAccountPaths(accountId) {
         latestFeedFile: isDefault ? path.join(DATA_ROOT, 'latest-feed.json') : path.join(root, 'latest-feed.json'),
         archiveStateFile: isDefault ? path.join(DATA_ROOT, 'eigenflux-state.json') : path.join(root, 'eigenflux-state.json'),
         profileFile: path.join(root, 'profile.json'),
-        statsFile: path.join(root, 'account-stats.json')
+        statsFile: isDefault ? path.join(DATA_ROOT, 'account-stats.json') : path.join(root, 'account-stats.json')
     };
 }
 
@@ -497,11 +515,29 @@ function archiveFeedItems(accountId, items, meta = {}) {
         safeJsonWrite(acc.paths.latestFeedFile, latest);
         safeJsonWrite(acc.paths.archiveStateFile, archiveState);
 
+        appendHealthLog(accountId, {
+            event: 'archive_feed',
+            ok: true,
+            date: dateKey,
+            feedCount: items.length,
+            newItems: newCount,
+            totalItems: archive.totalItems,
+            heartbeatCount: archive.heartbeatCount,
+            file: dailyFile,
+            action: meta.action || 'refresh',
+            limit: meta.limit || acc.config.feedLimit
+        });
+
         return { archived: true, newItems: newCount, totalItems: archive.totalItems, file: dailyFile };
     } catch (e) {
         acc.stats.errorCount++;
         state.stats.errorCount++;
         console.error(`[VCPEigenFlux] Feed归档失败 [${acc.id}]:`, e.message);
+        appendHealthLog(accountId, {
+            event: 'archive_feed',
+            ok: false,
+            error: e.message
+        });
         return { archived: false, error: e.message, newItems: 0, totalItems: 0 };
     }
 }// ============================================================
@@ -647,6 +683,7 @@ function makeRequest(accountId, method, apiPath, body = null) {
 // ============================================================
 
 async function feedPoll(accountId, limit, action = 'refresh', cursor = '') {
+    const startedAt = Date.now();
     const acc = ensureAccountState(accountId);
     const params = new URLSearchParams();
     params.set('limit', String(limit || acc.config.feedLimit || efConfig.feedLimit));
@@ -654,6 +691,17 @@ async function feedPoll(accountId, limit, action = 'refresh', cursor = '') {
     if (cursor) params.set('cursor', cursor);
 
     const resp = await makeRequest(accountId, 'GET', `/items/feed?${params.toString()}`);
+    appendHealthLog(accountId, {
+        event: 'feed_poll',
+        ok: resp.status === 200 && resp.data && resp.data.code === 0,
+        status: resp.status,
+        code: resp.data && resp.data.code,
+        feedCount: Array.isArray(resp.data?.data?.items) ? resp.data.data.items.length : 0,
+        action,
+        limit: limit || acc.config.feedLimit || efConfig.feedLimit,
+        cursor: cursor || '',
+        durationMs: Date.now() - startedAt
+    });
     if (resp.status === 200 && resp.data && resp.data.code === 0) {
         acc.feedCache = resp.data.data?.items || [];
         acc.lastFeedPoll = new Date().toISOString();

@@ -4,3 +4,5 @@ node_modules/
 data/
 accounts.config.json
 *.tmp
+account-stats.json
+bak/

@@ -2,8 +2,8 @@
   "manifestVersion": "1.0.0",
   "name": "VCPEigenFlux",
   "displayName": "EigenFlux Agent 广播网络",
-  "version": "0.2.1",
-  "description": "EigenFlux 广播网络桥接插件。基于 hybridservice 模式，支持单插件多账号采集：默认保留 technical / VCP Family 技术账号，并可扩展 creative、business、news、research 等专用账号。插件负责按账号错峰心跳拉取个性化 Feed、检查未读消息、发布广播、管理 Profile/私信/好友，并将每个账号的 Feed 独立归档为 latest-feed.json、eigenflux-state.json 与 feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json。本插件定位为 VCP 的语义情报采集层，不负责日报生成；后续日报、趋势分析、Agent 路由和知识沉淀应由独立消费层插件处理。直调 EigenFlux Hub HTTP API，无需安装 CLI 二进制。",
+  "version": "0.2.2",
+  "description": "EigenFlux 广播网络桥接插件。基于 hybridservice 模式，支持单插件多账号采集：默认保留 technical / VCP Family 技术账号，并可扩展 creative、business、news、research 等专用账号。插件负责按账号错峰心跳拉取个性化 Feed、检查未读消息、发布广播、管理 Profile/私信/好友，并将每个账号的 Feed 独立归档为 latest-feed.json、eigenflux-state.json 与 feed-archive/YYYY/MM/YYYY-MM-DD-eigenflux-feed.json。新增结构化健康日志 data/health-log.jsonl，用于记录 feed_poll / archive_feed 事件、请求状态、耗时、归档条数与错误信息。本插件定位为 VCP 的语义情报采集层，不负责日报生成；后续日报、趋势分析、Agent 路由和知识沉淀应由独立消费层插件处理。直调 EigenFlux Hub HTTP API，无需安装 CLI 二进制。",
   "author": "Nova & 梦",
   "pluginType": "hybridservice",
   "entryPoint": {
@@ -81,6 +81,8 @@
         "description": "查看或更新指定 EigenFlux Agent Profile。\n参数：\n- account (可选): 账号 ID，默认 technical\n- bio (可选): 传入则更新 Profile；不传则查看当前 Profile。Profile 应包含领域、目标、近期工作、需求等。"
       }
     ],
-    "systemPromptPlaceholders": ["{{VCPEigenFlux}}"]
+    "systemPromptPlaceholders": [
+      "{{VCPEigenFlux}}"
+    ]
   }
 }
