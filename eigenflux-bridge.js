@@ -17,6 +17,8 @@ const ACCOUNTS_CONFIG_FILE = path.join(__dirname, 'accounts.config.json');
 const DEFAULT_ACCOUNT_ID = 'technical';
 const DATA_ROOT = path.join(__dirname, 'data');
 const LEGACY_DATA_FILE = path.join(__dirname, 'eigenflux-data.json');
+const LATEST_ALL_FEEDS_FILE = path.join(DATA_ROOT, 'latest-all-feeds.json');
+const ACCOUNTS_STATE_FILE = path.join(DATA_ROOT, 'eigenflux-accounts-state.json');
 
 let efConfig = {
     hubEndpoint: 'https://www.eigenflux.ai',
@@ -275,6 +277,92 @@ function saveAccountData(accountId) {
         lastArchive: acc.lastArchive,
         lastSaved: new Date().toISOString()
     });
+    writeGlobalAccountIndex();
+}
+
+function buildGlobalAccountIndex() {
+    const nowIso = new Date().toISOString();
+    const accounts = Object.values(accountConfigs || {}).map(cfg => {
+        const acc = ensureAccountState(cfg.id);
+        const latest = safeJsonRead(acc.paths.latestFeedFile, {});
+        const archiveState = safeJsonRead(acc.paths.archiveStateFile, {});
+        return {
+            accountId: acc.id,
+            displayName: acc.displayName,
+            enabled: cfg.enabled !== false,
+            connected: !!acc.connected,
+            hasToken: !!(cfg.accessToken || (acc.id === DEFAULT_ACCOUNT_ID && efConfig.accessToken)),
+            heartbeatIntervalMin: cfg.heartbeatIntervalMin,
+            heartbeatOffsetMin: cfg.heartbeatOffsetMin || 0,
+            feedLimit: cfg.feedLimit,
+            lastFeedPoll: acc.lastFeedPoll,
+            lastMsgCheck: acc.lastMsgCheck,
+            feedCacheCount: acc.feedCache.length,
+            unreadMsgCount: acc.unreadMessages.length,
+            latestFeed: {
+                file: acc.paths.latestFeedFile,
+                updatedAt: latest.updatedAt || null,
+                date: latest.date || null,
+                feedCount: latest.feedCount || 0,
+                newItems: latest.newItems || 0,
+                dailyArchiveFile: latest.dailyArchiveFile || null
+            },
+            archiveState: {
+                file: acc.paths.archiveStateFile,
+                updatedAt: archiveState.updatedAt || null,
+                totalSeenItems: archiveState.totalSeenItems || 0,
+                days: archiveState.days || {}
+            },
+            stats: acc.stats
+        };
+    });
+
+    return {
+        source: 'EigenFlux',
+        schemaVersion: 1,
+        updatedAt: nowIso,
+        defaultAccountId: DEFAULT_ACCOUNT_ID,
+        accountCount: accounts.length,
+        enabledAccountCount: accounts.filter(a => a.enabled).length,
+        totalFeedCacheCount: accounts.reduce((sum, a) => sum + (a.feedCacheCount || 0), 0),
+        totalUnreadMsgCount: accounts.reduce((sum, a) => sum + (a.unreadMsgCount || 0), 0),
+        totalSeenItems: accounts.reduce((sum, a) => sum + (a.archiveState.totalSeenItems || 0), 0),
+        accounts
+    };
+}
+
+function writeGlobalAccountIndex() {
+    try {
+        const index = buildGlobalAccountIndex();
+        safeJsonWrite(ACCOUNTS_STATE_FILE, index);
+        safeJsonWrite(LATEST_ALL_FEEDS_FILE, {
+            source: index.source,
+            schemaVersion: index.schemaVersion,
+            updatedAt: index.updatedAt,
+            defaultAccountId: index.defaultAccountId,
+            accountCount: index.accountCount,
+            enabledAccountCount: index.enabledAccountCount,
+            totalFeedCacheCount: index.totalFeedCacheCount,
+            totalUnreadMsgCount: index.totalUnreadMsgCount,
+            totalSeenItems: index.totalSeenItems,
+            accounts: index.accounts.map(a => ({
+                accountId: a.accountId,
+                displayName: a.displayName,
+                enabled: a.enabled,
+                connected: a.connected,
+                lastFeedPoll: a.lastFeedPoll,
+                feedCacheCount: a.feedCacheCount,
+                unreadMsgCount: a.unreadMsgCount,
+                latestFeed: a.latestFeed,
+                archiveStateFile: a.archiveState.file
+            }))
+        });
+        return index;
+    } catch (e) {
+        state.stats.errorCount++;
+        console.error('[VCPEigenFlux] 全局账号索引写入失败:', e.message);
+        return null;
+    }
 }
 
 function getLocalDateParts(date = new Date()) {
@@ -927,6 +1015,11 @@ async function processToolCall(args) {
                 });
             }
 
+            case 'EFGlobalIndex': {
+                const index = writeGlobalAccountIndex() || buildGlobalAccountIndex();
+                return formatResult(true, 'EigenFlux 全局轻量索引', index);
+            }
+
             case 'EFAccounts': {
                 const list = Object.values(accountConfigs || {}).map(cfg => {
                     const a = ensureAccountState(cfg.id);
@@ -976,6 +1069,8 @@ function initialize(config) {
 
     state.startTime = Date.now();
     startHeartbeat();
+
+    writeGlobalAccountIndex();
 
     console.log(`[VCPEigenFlux] 初始化完成 | Default Hub: ${efConfig.hubEndpoint} | Accounts: ${Object.keys(accountConfigs || {}).length}`);
 }
@@ -1064,6 +1159,11 @@ function registerApiRoutes(router, config, projectBasePath, wss) {
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
+    });
+
+    router.get('/global-index', (req, res) => {
+        const index = writeGlobalAccountIndex() || buildGlobalAccountIndex();
+        res.json(index);
     });
 
     router.get('/accounts', (req, res) => {
