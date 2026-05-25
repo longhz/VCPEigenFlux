@@ -1018,6 +1018,8 @@ async function processToolCall(args) {
 
             case 'EFStatus': {
                 if (args.account) {
+                    const latest = safeJsonRead(acc.paths.latestFeedFile, {});
+                    const archiveState = safeJsonRead(acc.paths.archiveStateFile, {});
                     return formatResult(true, `账号[${accountId}]连接状态`, {
                         accountId: acc.id,
                         displayName: acc.displayName,
@@ -1027,6 +1029,20 @@ async function processToolCall(args) {
                         lastMsgCheck: acc.lastMsgCheck,
                         feedCacheCount: acc.feedCache.length,
                         unreadMsgCount: acc.unreadMessages.length,
+                        latestFeed: {
+                            file: acc.paths.latestFeedFile,
+                            updatedAt: latest.updatedAt || null,
+                            date: latest.date || null,
+                            feedCount: latest.feedCount || 0,
+                            newItems: latest.newItems || 0,
+                            dailyArchiveFile: latest.dailyArchiveFile || null
+                        },
+                        archiveState: {
+                            file: acc.paths.archiveStateFile,
+                            updatedAt: archiveState.updatedAt || null,
+                            totalSeenItems: archiveState.totalSeenItems || 0,
+                            days: archiveState.days || {}
+                        },
                         profile: acc.profile?.profile ? {
                             agent_name: acc.profile.profile.agent_name,
                             email: acc.profile.profile.email,
@@ -1042,18 +1058,36 @@ async function processToolCall(args) {
                     });
                 }
 
-                const summary = Object.values(state.accounts || {}).map(a => ({
-                    accountId: a.id,
-                    displayName: a.displayName,
-                    connected: a.connected,
-                    heartbeatRunning: !!a.heartbeatTimer,
-                    lastFeedPoll: a.lastFeedPoll,
-                    lastMsgCheck: a.lastMsgCheck,
-                    feedCacheCount: a.feedCache.length,
-                    unreadMsgCount: a.unreadMessages.length,
-                    stats: a.stats,
-                    enabled: a.config.enabled !== false
-                }));
+                const summary = Object.values(state.accounts || {}).map(a => {
+                    const latest = safeJsonRead(a.paths.latestFeedFile, {});
+                    const archiveState = safeJsonRead(a.paths.archiveStateFile, {});
+                    return {
+                        accountId: a.id,
+                        displayName: a.displayName,
+                        connected: a.connected,
+                        heartbeatRunning: !!a.heartbeatTimer,
+                        lastFeedPoll: a.lastFeedPoll,
+                        lastMsgCheck: a.lastMsgCheck,
+                        feedCacheCount: a.feedCache.length,
+                        unreadMsgCount: a.unreadMessages.length,
+                        latestFeed: {
+                            file: a.paths.latestFeedFile,
+                            updatedAt: latest.updatedAt || null,
+                            date: latest.date || null,
+                            feedCount: latest.feedCount || 0,
+                            newItems: latest.newItems || 0,
+                            dailyArchiveFile: latest.dailyArchiveFile || null
+                        },
+                        archiveState: {
+                            file: a.paths.archiveStateFile,
+                            updatedAt: archiveState.updatedAt || null,
+                            totalSeenItems: archiveState.totalSeenItems || 0,
+                            days: archiveState.days || {}
+                        },
+                        stats: a.stats,
+                        enabled: a.config.enabled !== false
+                    };
+                });
 
                 return formatResult(true, 'EigenFlux 多账号状态', {
                     defaultAccountId: DEFAULT_ACCOUNT_ID,
